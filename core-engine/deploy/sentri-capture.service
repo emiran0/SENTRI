@@ -1,0 +1,14 @@
+[Unit]
+Description=SENTRI IoT subnet capture
+After=network-online.target
+
+[Service]
+Type=simple
+User=root
+ExecStartPre=/bin/mkdir -p /srv/sentri/captures
+ExecStart=/usr/bin/tcpdump -i eth1 -n -s 96 -G 300 -w /srv/sentri/captures/iot-%%Y%%m%%d-%%H%%M%%S.pcap
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

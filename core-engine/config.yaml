@@ -1,0 +1,60 @@
+run_label: "dev"
+
+paths:
+  db: /srv/sentri/sentri.db
+  captures: /srv/sentri/captures
+  pihole_log: /var/log/pihole/pihole.log
+  nft_file: nftables/sentri.nft
+
+capture:
+  grace_seconds: 60
+  poll_seconds: 30
+
+network:
+  gateway_ip: 192.168.50.1
+  iface: eth1
+
+exclude:
+  macs:
+    - "dc:a6:32:00:00:01"
+    - "aa:bb:cc:dd:ee:ff"
+    - "b8:27:eb:00:00:02"
+  tcp_ports: [8080, 22]
+
+learning:
+  min_windows: 200
+  learning_hours: 6
+  hard_stop_hours: 72
+  stability_fraction: 0.25
+  learn_include_empty: false
+
+thresholds:
+  alert_multiplier: 1.5
+  critical_multiplier: 4.0
+  deescalate_windows: 3
+
+# smallest physically meaningful difference per feature, in the feature's model
+# space (log1p applied where the feature table says so), used as a standard deviation
+variance_floors:
+  pkts_out_rate: 0.01
+  pkts_in_rate: 0.01
+  bytes_out_rate: 0.01
+  bytes_in_rate: 0.01
+  mean_pkt_size_out: 1.0
+  std_pkt_size_out: 1.0
+  mean_iat_out: 0.005
+  std_iat_out: 0.005
+  frac_small_out: 0.01
+  frac_large_out: 0.01
+  distinct_peers: 0.01
+  tcp_syn_rate: 0.01
+
+enforcement:
+  mode: observe
+  never_enforce:
+    - "aa:bb:cc:dd:ee:ff"
+  auto_clear_hours: 2
+
+ground_truth:
+  poll_seconds: 300
+  nodes: {}

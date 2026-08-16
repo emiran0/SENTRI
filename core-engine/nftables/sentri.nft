@@ -1,0 +1,34 @@
+#!/usr/sbin/nft -f
+# SENTRI enforcement. Edit rates and verdicts here, not in Python.
+
+table inet sentri
+delete table inet sentri
+
+table inet sentri {
+    # populated at runtime by sentri/enforce.py
+    set blocked_mac   { type ether_addr ; }
+    set blocked_ip    { type ipv4_addr ;  }
+    set throttled_mac { type ether_addr ; }
+
+    # kernel managed token bucket, one entry per throttled device
+    set throttle_meter {
+        type ether_addr
+        size 64
+        timeout 5m
+        flags dynamic
+    }
+
+    chain forward {
+        type filter hook forward priority filter; policy accept;
+
+        # block tier, device to internet
+        ether saddr @blocked_mac counter drop
+        # block tier, internet back to device
+        ip daddr @blocked_ip counter drop
+
+        # throttle tier, per device rate limit
+        ether saddr @throttled_mac \
+            update @throttle_meter { ether saddr limit rate over 20 kbytes/second } \
+            counter drop
+    }
+}

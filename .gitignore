@@ -1,0 +1,12 @@
+data/
+*.pcap
+*.pcap.gz
+*.db
+*.db-wal
+*.db-shm
+.venv/
+__pycache__/
+node-firmware/CLAUDE_firmware.md
+node-firmware/src/secrets.h
+core-engine/CLAUDE_core.md
+node-firmware/.pio/

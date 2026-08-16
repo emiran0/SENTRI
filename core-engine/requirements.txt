@@ -1,0 +1,3 @@
+# numpy, scipy and scikit-learn come from apt on the Pi, see section 12
+scapy>=2.5.0
+pyyaml>=6.0

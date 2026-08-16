@@ -1,0 +1,15 @@
+[Unit]
+Description=SENTRI behavioural firewall engine
+After=network-online.target sentri-capture.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/home/pi/SENTRI/core-engine
+ExecStartPre=/usr/sbin/nft -f /home/pi/SENTRI/core-engine/nftables/sentri.nft
+ExecStart=/home/pi/SENTRI/core-engine/.venv/bin/python -m sentri.cli run
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
