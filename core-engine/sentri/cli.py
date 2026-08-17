@@ -9,7 +9,7 @@ TABLES = ("windows", "scores", "events")
 
 
 def cmd_init(conn, conf, args):
-    enforce.load_ruleset(conf["paths"]["nft_file"])
+    # enforce.load_ruleset(conf["paths"]["nft_file"])
     print("database at %s, ruleset %s loaded" % (conf["paths"]["db"], conf["paths"]["nft_file"]))
 
 

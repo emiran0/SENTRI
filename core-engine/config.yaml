@@ -1,4 +1,4 @@
-run_label: "dev"
+run_label: "tapo-idle-24h"
 
 paths:
   db: /srv/sentri/sentri.db
@@ -16,14 +16,17 @@ network:
 
 exclude:
   macs:
-    - "dc:a6:32:00:00:01"
-    - "aa:bb:cc:dd:ee:ff"
-    - "b8:27:eb:00:00:02"
+    - "94:83:c4:8e:7b:80" # Opal 2 (5GHz) MAC 
+    - "4a:aa:14:4b:bb:93" # Laptop MAC
+    - "9c:69:d3:92:4b:9a" # eth1 MAC / Opal
+    - "8e:49:76:ec:72:83" # Phone MAC
+    # - "e0:d3:62:fb:cb:97" # Tapo Smart Bulb MAC
+    - "88:a2:9e:d9:ab:47" # wlan0 MAC
   tcp_ports: [8080, 22]
 
 learning:
   min_windows: 200
-  learning_hours: 6
+  learning_hours: 24
   hard_stop_hours: 72
   stability_fraction: 0.25
   learn_include_empty: false

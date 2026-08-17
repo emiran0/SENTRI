@@ -8,7 +8,10 @@ SETS = ("blocked_mac", "throttled_mac", "blocked_ip")
 
 
 def nft(args, check=True):
-    return subprocess.run(["nft"] + args, check=check, capture_output=True, text=True)
+    r = subprocess.run(["nft"] + args, capture_output=True, text=True)
+    if check and r.returncode != 0:
+        raise RuntimeError("nft " + " ".join(args) + " failed: " + r.stderr.strip())
+    return r
 
 
 def add(name, element):
