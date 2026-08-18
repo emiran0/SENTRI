@@ -31,8 +31,19 @@ learning:
   stability_fraction: 0.25
   learn_include_empty: false
 
+# the subset the model consumes, extraction always computes all twelve
+# pick this from tools/feature_report.py, not by guessing
+model_features:
+  - bytes_out_rate
+  - bytes_in_rate
+  - mean_pkt_size_out
+  - std_pkt_size_out
+  - mean_iat_out
+  - distinct_peers
+
 thresholds:
-  alert_multiplier: 1.5
+  rule: p99_margin # max_margin | p99_margin | chi2
+  alert_margin: 3.0
   critical_multiplier: 4.0
   deescalate_windows: 3
 

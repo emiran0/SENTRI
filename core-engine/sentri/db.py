@@ -50,7 +50,16 @@ def connect(path):
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA synchronous = NORMAL")
     conn.executescript(SCHEMA)
+    ensure_column(conn, "baselines", "feature_names_json", "TEXT")
     return conn
+
+
+# CREATE TABLE IF NOT EXISTS cannot add a column to a table that already exists
+def ensure_column(conn, table, column, decl):
+    present = [r["name"] for r in rows(conn, "PRAGMA table_info(" + table + ")")]
+    if column not in present:
+        conn.execute("ALTER TABLE " + table + " ADD COLUMN " + column + " " + decl)
+        conn.commit()
 
 
 def rows(conn, sql, args=()):
@@ -112,13 +121,16 @@ def prev_window(conn, mac, window_start):
     )
 
 
-def add_baseline(conn, mac, n_windows, mean, precision, thresholds, dest_set, service_set, quality):
+def add_baseline(conn, mac, n_windows, mean, precision, thresholds, dest_set, service_set,
+                 quality, names):
     conn.execute("UPDATE baselines SET active = 0 WHERE mac = ?", (mac,))
     cur = conn.execute(
         "INSERT INTO baselines (mac, created_at, n_windows, active, mean_json, precision_json,"
-        " thresholds_json, dest_set_json, service_set_json, quality_json) VALUES (?,?,?,1,?,?,?,?,?,?)",
+        " thresholds_json, dest_set_json, service_set_json, quality_json, feature_names_json)"
+        " VALUES (?,?,?,1,?,?,?,?,?,?,?)",
         (mac, time.time(), n_windows, json.dumps(mean), json.dumps(precision),
-         json.dumps(thresholds), json.dumps(dest_set), json.dumps(service_set), json.dumps(quality)),
+         json.dumps(thresholds), json.dumps(dest_set), json.dumps(service_set),
+         json.dumps(quality), json.dumps(names)),
     )
     conn.commit()
     return cur.lastrowid

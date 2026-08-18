@@ -53,32 +53,64 @@ def expired(dev, now, conf):
     return (now - dev["learning_started"]) / 3600.0 >= conf["learning"]["hard_stop_hours"]
 
 
+def valid_names(names, where):
+    unknown = [n for n in names if n not in FEATURES]
+    if unknown:
+        raise ValueError(where + " has unknown features: " + ", ".join(unknown))
+    return names
+
+
+# row wise quadratic form, one squared distance per window
+def distances(matrix, mean, precision):
+    deltas = matrix - mean
+    return np.einsum("ij,jk,ik->i", deltas, precision, deltas)
+
+
+def pick_thresholds(calib_d2, dims, conf):
+    rules = conf["thresholds"]
+    calib = {
+        "p50": float(np.percentile(calib_d2, 50)),
+        "p95": float(np.percentile(calib_d2, 95)),
+        "p99": float(np.percentile(calib_d2, 99)),
+        "max": float(calib_d2.max()),
+    }
+    # all three are stored every fit so a threshold rule comparison needs only a re-score
+    candidates = {
+        "max_margin": calib["max"] * rules["alert_margin"],
+        "p99_margin": calib["p99"] * rules["alert_margin"],
+        "chi2": float(chi2.ppf(0.999, dims)),
+    }
+    t_alert = candidates[rules["rule"]]
+    return {
+        "rule": rules["rule"],
+        "t_alert": t_alert,
+        "t_critical": t_alert * rules["critical_multiplier"],
+        "candidates": candidates,
+        "calib": calib,
+        "chi2": {"p50": float(chi2.ppf(0.50, dims)), "p95": float(chi2.ppf(0.95, dims)),
+                 "p99": float(chi2.ppf(0.99, dims)), "p999": float(chi2.ppf(0.999, dims))},
+    }
+
+
 def fit(conn, mac, dev, conf, forced=False):
     windows = usable(conn, mac, dev, conf)
     status = gates(windows, dev, conf)
-    if len(windows) <= len(FEATURES) + 1:
+    names = valid_names(conf["model_features"], "model_features")
+    if len(windows) <= len(names) + 1:
         log.warning("%s cannot fit, only %d usable windows", mac, len(windows))
         return None
-    matrix = np.array([to_vector(json.loads(w["features_json"])) for w in windows])
-    split = max(len(FEATURES) + 1, int(len(matrix) * FIT_FRACTION))
+    matrix = np.array([to_vector(json.loads(w["features_json"]), names) for w in windows])
+    split = max(len(names) + 1, int(len(matrix) * FIT_FRACTION))
     train, calib = matrix[:split], matrix[split:]
     if not len(calib):
         train, calib = matrix[:-1], matrix[-1:]
     mean = train.mean(axis=0)
     cov = LedoitWolf(assume_centered=False).fit(train).covariance_
-    floors = np.array([conf["variance_floors"].get(f, 0.0) for f in FEATURES])
+    floors = np.array([conf["variance_floors"].get(f, 0.0) for f in names])
     np.fill_diagonal(cov, np.maximum(np.diag(cov), floors ** 2))
-    cov = cov + RIDGE * np.eye(len(FEATURES))
+    cov = cov + RIDGE * np.eye(len(names))
     precision = np.linalg.inv(cov)
-    deltas = calib - mean
-    # row wise quadratic form, one squared distance per calibration window
-    calib_d2 = np.einsum("ij,jk,ik->i", deltas, precision, deltas)
-    theory = float(chi2.ppf(0.999, len(FEATURES)))
-    t_alert = max(float(calib_d2.max()) * conf["thresholds"]["alert_multiplier"], theory)
-    thresholds = {
-        "t_alert": t_alert,
-        "t_critical": t_alert * conf["thresholds"]["critical_multiplier"],
-    }
+    thresholds = pick_thresholds(distances(calib, mean, precision), len(names), conf)
     dests, ips, services = set(), set(), set()
     for w in windows:
         counters = json.loads(w["counters_json"])
@@ -92,24 +124,14 @@ def fit(conn, mac, dev, conf, forced=False):
         "n_fit": len(train),
         "n_calib": len(calib),
         "std": np.sqrt(np.diag(cov)).tolist(),
-        "empirical": {
-            "p95": float(np.percentile(calib_d2, 95)),
-            "p99": float(np.percentile(calib_d2, 99)),
-            "max": float(calib_d2.max()),
-        },
-        # kept alongside the empirical values to show how far real IoT traffic
-        # is from the multivariate Gaussian assumption
-        "chi2": {
-            "p95": float(chi2.ppf(0.95, len(FEATURES))),
-            "p99": float(chi2.ppf(0.99, len(FEATURES))),
-            "p999": theory,
-        },
+        # a well conditioned fit lands near the feature count, far below means collinearity
+        "median_fit_d2": float(np.median(distances(train, mean, precision))),
     }
     baseline_id = db.add_baseline(conn, mac, len(windows), mean.tolist(), precision.tolist(),
                                   thresholds, {"keys": sorted(dests), "ips": sorted(ips)},
-                                  sorted(services), quality)
-    log.info("%s baseline %d fitted on %d windows, t_alert %.1f", mac, baseline_id,
-             len(windows), t_alert)
+                                  sorted(services), quality, names)
+    log.info("%s baseline %d fitted on %d windows, %d features, t_alert %.2f", mac,
+             baseline_id, len(windows), len(names), thresholds["t_alert"])
     return baseline_id
 
 
@@ -118,8 +140,11 @@ def load(conn, mac):
     if not row:
         return None
     dest_set = json.loads(row["dest_set_json"])
+    stored = row["feature_names_json"]
     return {
         "id": row["id"],
+        # baselines fitted before the feature set was configurable used all twelve
+        "names": valid_names(json.loads(stored) if stored else list(FEATURES), "baseline"),
         "mean": np.array(json.loads(row["mean_json"])),
         "precision": np.array(json.loads(row["precision_json"])),
         "thresholds": json.loads(row["thresholds_json"]),

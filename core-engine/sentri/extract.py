@@ -173,8 +173,8 @@ def window_features(pkts, duration, device_ip, dnslog, gateway):
     return feats, counters
 
 
-def to_vector(feats):
-    return np.array([np.log1p(feats[f]) if f in LOG_FEATURES else feats[f] for f in FEATURES])
+def to_vector(feats, names=FEATURES):
+    return np.array([np.log1p(feats[f]) if f in LOG_FEATURES else feats[f] for f in names])
 
 
 class Windower:

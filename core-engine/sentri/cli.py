@@ -3,14 +3,15 @@ import csv
 import json
 import time
 
-from . import baseline, config, db, engine, enforce
+from . import baseline, config, db, engine, enforce, extract, score
 
 TABLES = ("windows", "scores", "events")
 
 
 def cmd_init(conn, conf, args):
-    # enforce.load_ruleset(conf["paths"]["nft_file"])
-    print("database at %s, ruleset %s loaded" % (conf["paths"]["db"], conf["paths"]["nft_file"]))
+    if conf["enforcement"]["mode"] == "enforce":
+        enforce.load_ruleset(conf["paths"]["nft_file"])
+    print("database at %s, mode %s" % (conf["paths"]["db"], conf["enforcement"]["mode"]))
 
 
 def cmd_run(conn, conf, args):
@@ -40,6 +41,33 @@ def cmd_rebaseline(conn, conf, args):
                      consecutive_count=0, learning_started=time.time())
     db.add_event(conn, args.mac, time.time(), "normal", "rebaseline", "baseline wiped", {})
     print("%s back to learning" % args.mac)
+
+
+def cmd_refit(conn, conf, args):
+    dev = db.get_device(conn, args.mac)
+    baseline_id = baseline.fit(conn, args.mac, dev, conf, forced=True)
+    if baseline_id is None:
+        return
+    db.update_device(conn, args.mac, baseline_id=baseline_id)
+    base = baseline.load(conn, args.mac)
+    thresholds = base["thresholds"]
+    for window in db.learning_windows(conn, args.mac, 0):
+        feats = json.loads(window["features_json"])
+        d2, contributions, zscores = score.distance(
+            extract.to_vector(feats, base["names"]), base)
+        # a stateless per window severity, so a false positive count is one GROUP BY,
+        # and the stored novelty reflects the old destination set so it is not replayed
+        tier = "normal"
+        if d2 >= thresholds["t_critical"]:
+            tier = "block"
+        elif d2 >= thresholds["t_alert"]:
+            tier = "alert"
+        db.add_score(conn, window["id"], baseline_id, args.mac, d2, tier, contributions, zscores)
+    db.add_event(conn, args.mac, time.time(), "normal", "refit",
+                 "baseline %d over %d features" % (baseline_id, len(base["names"])), thresholds)
+    print("%s baseline %d, t_alert %.2f, t_critical %.2f, rescored %d windows" % (
+        args.mac, baseline_id, thresholds["t_alert"], thresholds["t_critical"],
+        len(db.learning_windows(conn, args.mac, 0))))
 
 
 def cmd_unblock(conn, conf, args):
@@ -97,6 +125,9 @@ def main():
     rebase = subs.add_parser("rebaseline")
     rebase.add_argument("mac")
     rebase.set_defaults(func=cmd_rebaseline)
+    refit = subs.add_parser("refit")
+    refit.add_argument("mac")
+    refit.set_defaults(func=cmd_refit)
     unblock = subs.add_parser("unblock")
     unblock.add_argument("mac")
     unblock.set_defaults(func=cmd_unblock)

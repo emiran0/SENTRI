@@ -1,19 +1,18 @@
 import numpy as np
 
-from .extract import FEATURES
-
 TIERS = ("normal", "alert", "throttle", "block")
 
 
 def distance(vector, base):
+    names = base["names"]
     delta = vector - base["mean"]
     weighted = base["precision"] @ delta
     d2 = float(delta @ weighted)
     contrib = delta * weighted
-    top = [{"feature": FEATURES[i], "value": float(contrib[i]),
+    top = [{"feature": names[i], "value": float(contrib[i]),
             "share": float(contrib[i] / d2) if d2 else 0.0}
            for i in np.argsort(-np.abs(contrib))[:3]]
-    zscores = dict(zip(FEATURES, (delta / base["std"]).tolist()))
+    zscores = dict(zip(names, (delta / base["std"]).tolist()))
     return d2, top, zscores
 
 
