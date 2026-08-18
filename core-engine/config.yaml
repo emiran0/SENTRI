@@ -1,9 +1,13 @@
+# Any change done, to apply a core-service restart is required. The service will be 
+# restarted automatically if the config file is changed.
+
 run_label: "tapo-idle-24h"
 
 paths:
   db: /srv/sentri/sentri.db
   captures: /srv/sentri/captures
-  pihole_log: /var/log/pihole/pihole.log
+  # bind mounted out of the pihole container, see the compose file in ~/pihole
+  pihole_log: /home/emiran/pihole/var-log-pihole/pihole.log
   nft_file: nftables/sentri.nft
 
 capture:
@@ -40,15 +44,21 @@ model_features:
   - mean_iat_out # timing, near orthogonal to every volume and size feature
   - std_iat_out # jitter, only 0.79 with mean_iat_out on e0:d3:62:fb:cb:97
   - distinct_peers # destination breadth
-# tcp_syn_rate dropped, it sits at its variance floor on both persistent TLS devices,
-# put it back when the sensor node arrives since that opens a connection per report
+  - tcp_syn_rate # connection rate, at its floor on persistent TLS, live on the sensor node
 
 thresholds:
-  rule: p99_margin # max_margin | p99_margin | chi2
-  # 2.0 gives zero false positives over 719 normal windows with 38 percent headroom above
-  # the observed maximum, and still catches a 1.5x volume injection, the weakest the nodes send
-  alert_margin: 2.0
-  critical_multiplier: 4.0
+  rule: p95_margin # max_margin | p99_margin | p95_margin | chi2
+  # measured on 539 post cloud migration windows, calibration held out in 6 h blocks.
+  # p95 with margin 1.0 lands under the chi2 floor, so t_alert is the floor at 22.46. that
+  # still catches a 3x volume and a 2x cadence injection and leaves the periodic TP-Link
+  # check in as isolated alert windows, which decide_tier never escalates past alert.
+  # a 1.5x volume injection scores 4.7 against a normal maximum of 89 and is not separable
+  # at any threshold that keeps normal traffic quiet, so do not tune for it
+  alert_margin: 1.0
+  # 4.0 put t_critical at 61 and sent 12 normal check in windows straight to block, with no
+  # consecutive window guard on the critical path. 10.0 clears the observed normal maximum
+  # on both devices and still blocks a 4x cadence injection
+  critical_multiplier: 10.0
   deescalate_windows: 3
 
 # smallest physically meaningful difference per feature, in the feature's model
@@ -74,5 +84,6 @@ enforcement:
   auto_clear_hours: 2
 
 ground_truth:
-  poll_seconds: 300
+  # set to 60 seconds for injection tests
+  poll_seconds: 300 
   nodes: {}

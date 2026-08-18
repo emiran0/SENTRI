@@ -9,7 +9,8 @@ from . import db
 from .extract import FEATURES, WINDOW_SECONDS, to_vector
 
 log = logging.getLogger("sentri")
-FIT_FRACTION = 0.8
+CALIB_CHUNKS = 10
+CALIB_HOLDOUT = (4, 9)
 RIDGE = 1e-6
 
 
@@ -78,9 +79,11 @@ def pick_thresholds(calib_d2, dims, conf):
     candidates = {
         "max_margin": calib["max"] * rules["alert_margin"],
         "p99_margin": calib["p99"] * rules["alert_margin"],
+        "p95_margin": calib["p95"] * rules["alert_margin"],
         "chi2": float(chi2.ppf(0.999, dims)),
     }
-    t_alert = candidates[rules["rule"]]
+    # the chi2 floor stops a quiet calibration slice setting a threshold below the noise
+    t_alert = max(candidates[rules["rule"]], candidates["chi2"])
     return {
         "rule": rules["rule"],
         "t_alert": t_alert,
@@ -100,10 +103,14 @@ def fit(conn, mac, dev, conf, forced=False):
         log.warning("%s cannot fit, only %d usable windows", mac, len(windows))
         return None
     matrix = np.array([to_vector(json.loads(w["features_json"]), names) for w in windows])
-    split = max(len(names) + 1, int(len(matrix) * FIT_FRACTION))
-    train, calib = matrix[:split], matrix[split:]
-    if not len(calib):
-        train, calib = matrix[:-1], matrix[-1:]
+    # hold out two spread chunks, a tail slice between two cloud check ins sees idle alone
+    starts = np.array([w["window_start"] for w in windows])
+    span = max(1, int(starts[-1] - starts[0]) + 1)
+    held = np.isin((starts - starts[0]) * CALIB_CHUNKS // span, CALIB_HOLDOUT)
+    if len(matrix) - int(held.sum()) <= len(names) + 1 or held.sum() < 2:
+        held = np.zeros(len(matrix), dtype=bool)
+        held[-1] = True
+    train, calib = matrix[~held], matrix[held]
     mean = train.mean(axis=0)
     floors = np.array([conf["variance_floors"].get(f, 0.0) for f in names])
     if not floors.all():

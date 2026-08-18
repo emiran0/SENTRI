@@ -140,8 +140,8 @@ def active_baseline(conn, mac):
     return one(conn, "SELECT * FROM baselines WHERE mac = ? AND active = 1", (mac,))
 
 
-def drop_baselines(conn, mac):
-    conn.execute("DELETE FROM baselines WHERE mac = ?", (mac,))
+def deactivate_baselines(conn, mac):
+    conn.execute("UPDATE baselines SET active = 0 WHERE mac = ?", (mac,))
     conn.commit()
 
 

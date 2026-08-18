@@ -36,10 +36,10 @@ def cmd_status(conn, conf, args):
 
 
 def cmd_rebaseline(conn, conf, args):
-    db.drop_baselines(conn, args.mac)
+    db.deactivate_baselines(conn, args.mac)
     db.update_device(conn, args.mac, state="learning", baseline_id=None, tier="normal",
                      consecutive_count=0, learning_started=time.time())
-    db.add_event(conn, args.mac, time.time(), "normal", "rebaseline", "baseline wiped", {})
+    db.add_event(conn, args.mac, time.time(), "normal", "rebaseline", "baseline retired", {})
     print("%s back to learning" % args.mac)
 
 

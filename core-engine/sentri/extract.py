@@ -47,6 +47,7 @@ class DnsLog:
         self.offset = 0
         self.names = {}
         self.pending = {}
+        self.chain = None
 
     def refresh(self, now):
         if not self.path or not os.path.exists(self.path):
@@ -69,10 +70,14 @@ class DnsLog:
             return
         if parts[4].startswith("query[") and parts[6] == "from":
             self.pending[parts[5]] = (parts[7], now)
-        elif parts[4] == "reply" and parts[6] == "is" and parts[7][0].isdigit():
+            self.chain = (parts[7], parts[5])
+        elif parts[4] == "reply" and parts[6] == "is":
             asked = self.pending.get(parts[5])
             if asked:
-                self.names[(asked[0], parts[7])] = (parts[5], now)
+                self.chain = (asked[0], parts[5])
+            # each cname hop gets its own reply line, so the address line carries the alias
+            if self.chain and parts[7][0].isdigit():
+                self.names[(self.chain[0], parts[7])] = (self.chain[1], now)
 
     def lookup(self, client_ip, peer_ip):
         hit = self.names.get((client_ip, peer_ip))
