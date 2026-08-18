@@ -61,9 +61,9 @@ def valid_names(names, where):
 
 
 # row wise quadratic form, one squared distance per window
-def distances(matrix, mean, precision):
-    deltas = matrix - mean
-    return np.einsum("ij,jk,ik->i", deltas, precision, deltas)
+def distances(matrix, mean, scale, precision):
+    z = (matrix - mean) / scale
+    return np.einsum("ij,jk,ik->i", z, precision, z)
 
 
 def pick_thresholds(calib_d2, dims, conf):
@@ -105,12 +105,17 @@ def fit(conn, mac, dev, conf, forced=False):
     if not len(calib):
         train, calib = matrix[:-1], matrix[-1:]
     mean = train.mean(axis=0)
-    cov = LedoitWolf(assume_centered=False).fit(train).covariance_
     floors = np.array([conf["variance_floors"].get(f, 0.0) for f in names])
-    np.fill_diagonal(cov, np.maximum(np.diag(cov), floors ** 2))
+    if not floors.all():
+        raise ValueError("variance_floors missing for: " + ", ".join(
+            n for n, f in zip(names, floors) if not f))
+    # standardise before shrinkage: LedoitWolf shrinks toward trace over p times the
+    # identity, so one feature measured in bytes drowns every log scale feature
+    scale = np.maximum(train.std(axis=0), floors)
+    cov = LedoitWolf(assume_centered=True).fit((train - mean) / scale).covariance_
     cov = cov + RIDGE * np.eye(len(names))
     precision = np.linalg.inv(cov)
-    thresholds = pick_thresholds(distances(calib, mean, precision), len(names), conf)
+    thresholds = pick_thresholds(distances(calib, mean, scale, precision), len(names), conf)
     dests, ips, services = set(), set(), set()
     for w in windows:
         counters = json.loads(w["counters_json"])
@@ -123,9 +128,10 @@ def fit(conn, mac, dev, conf, forced=False):
         "forced": forced,
         "n_fit": len(train),
         "n_calib": len(calib),
-        "std": np.sqrt(np.diag(cov)).tolist(),
+        "scale": scale.tolist(),
+        "correlation": cov.tolist(),
         # a well conditioned fit lands near the feature count, far below means collinearity
-        "median_fit_d2": float(np.median(distances(train, mean, precision))),
+        "median_fit_d2": float(np.median(distances(train, mean, scale, precision))),
     }
     baseline_id = db.add_baseline(conn, mac, len(windows), mean.tolist(), precision.tolist(),
                                   thresholds, {"keys": sorted(dests), "ips": sorted(ips)},
@@ -140,16 +146,19 @@ def load(conn, mac):
     if not row:
         return None
     dest_set = json.loads(row["dest_set_json"])
+    quality = json.loads(row["quality_json"])
     stored = row["feature_names_json"]
+    # baselines fitted before the feature set was configurable used all twelve
+    names = valid_names(json.loads(stored) if stored else list(FEATURES), "baseline")
     return {
         "id": row["id"],
-        # baselines fitted before the feature set was configurable used all twelve
-        "names": valid_names(json.loads(stored) if stored else list(FEATURES), "baseline"),
+        "names": names,
         "mean": np.array(json.loads(row["mean_json"])),
         "precision": np.array(json.loads(row["precision_json"])),
         "thresholds": json.loads(row["thresholds_json"]),
         "dests": set(dest_set["keys"]),
         "ips": set(dest_set["ips"]),
         "services": set(json.loads(row["service_set_json"])),
-        "std": np.array(json.loads(row["quality_json"])["std"]),
+        # a baseline fitted before standardisation has its precision in raw feature space
+        "scale": np.array(quality["scale"]) if "scale" in quality else np.ones(len(names)),
     }

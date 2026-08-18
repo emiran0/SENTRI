@@ -1,4 +1,6 @@
 data/
+docs/
+research/
 *.pcap
 *.pcap.gz
 *.db

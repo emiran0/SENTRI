@@ -78,15 +78,19 @@ if constant:
     print("constant features, they carry no information at this traffic level: %s"
           % ", ".join(constant))
 
+live = [i for i in range(len(FEATURES)) if FEATURES[i] not in constant]
 raw = np.cov(matrix, rowvar=False)
-shrunk = LedoitWolf(assume_centered=False).fit(matrix).covariance_
-eigenvalues = np.sort(np.linalg.eigvalsh(raw))[::-1]
+scale = np.maximum(matrix.std(axis=0), 1e-9)
+shrunk = LedoitWolf(assume_centered=False).fit(matrix / scale).covariance_
+# rank is measured on the correlation matrix, on the covariance it only reports the
+# spread of units, since a feature in bytes dwarfs one in log space
+eigenvalues = np.sort(np.linalg.eigvalsh(corr[np.ix_(live, live)]))[::-1]
 rank = int((eigenvalues > eigenvalues[0] * 0.01).sum())
-print("\ncondition number raw      %.4g" % np.linalg.cond(raw))
-print("condition number shrunk  %.4g" % np.linalg.cond(shrunk))
-print("effective rank           %d of %d (eigenvalues above 1 percent of the largest)"
-      % (rank, len(FEATURES)))
-print("eigenvalues              %s" % " ".join("%.4g" % v for v in eigenvalues))
+print("\ncondition number, covariance as fitted    %.4g" % np.linalg.cond(raw))
+print("condition number, standardised then shrunk %.4g" % np.linalg.cond(shrunk))
+print("effective rank   %d of %d non constant (correlation eigenvalues above 1 percent)"
+      % (rank, len(live)))
+print("eigenvalues      %s" % " ".join("%.4g" % v for v in eigenvalues))
 
 row = (db.one(conn, "SELECT * FROM baselines WHERE id = ?", (args.baseline,)) if args.baseline
        else db.active_baseline(conn, args.mac))
@@ -97,6 +101,8 @@ if row:
     print("\nbaseline %d, %d windows, %d features: %s" % (
         row["id"], row["n_windows"], len(names), ", ".join(names)))
     print("thresholds %s" % row["thresholds_json"])
-    print("std        %s" % " ".join("%.4f" % v for v in quality["std"]))
+    spread = quality.get("scale") or quality["std"]
+    print("%-10s %s" % ("scale" if "scale" in quality else "std (pre standardisation)",
+                        " ".join("%.4f" % v for v in spread)))
     if "median_fit_d2" in quality:
         print("median fit d2 %.3f against %d features" % (quality["median_fit_d2"], len(names)))

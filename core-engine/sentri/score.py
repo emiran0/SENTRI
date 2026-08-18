@@ -5,14 +5,15 @@ TIERS = ("normal", "alert", "throttle", "block")
 
 def distance(vector, base):
     names = base["names"]
-    delta = vector - base["mean"]
+    # the precision is fitted in standardised space, so delta is already the z score
+    delta = (vector - base["mean"]) / base["scale"]
     weighted = base["precision"] @ delta
     d2 = float(delta @ weighted)
     contrib = delta * weighted
     top = [{"feature": names[i], "value": float(contrib[i]),
             "share": float(contrib[i] / d2) if d2 else 0.0}
            for i in np.argsort(-np.abs(contrib))[:3]]
-    zscores = dict(zip(names, (delta / base["std"]).tolist()))
+    zscores = dict(zip(names, delta.tolist()))
     return d2, top, zscores
 
 

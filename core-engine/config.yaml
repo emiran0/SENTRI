@@ -34,16 +34,20 @@ learning:
 # the subset the model consumes, extraction always computes all twelve
 # pick this from tools/feature_report.py, not by guessing
 model_features:
-  - bytes_out_rate
-  - bytes_in_rate
-  - mean_pkt_size_out
-  - std_pkt_size_out
-  - mean_iat_out
-  - distinct_peers
+  - bytes_out_rate # volume out, pkts_out_rate is 0.99 with it
+  - bytes_in_rate # volume in, pkts_in_rate is 0.99 with it
+  - mean_pkt_size_out # size, absorbs std_pkt_size_out and both frac features at 0.98 to 1.00
+  - mean_iat_out # timing, near orthogonal to every volume and size feature
+  - std_iat_out # jitter, only 0.79 with mean_iat_out on e0:d3:62:fb:cb:97
+  - distinct_peers # destination breadth
+# tcp_syn_rate dropped, it sits at its variance floor on both persistent TLS devices,
+# put it back when the sensor node arrives since that opens a connection per report
 
 thresholds:
   rule: p99_margin # max_margin | p99_margin | chi2
-  alert_margin: 3.0
+  # 2.0 gives zero false positives over 719 normal windows with 38 percent headroom above
+  # the observed maximum, and still catches a 1.5x volume injection, the weakest the nodes send
+  alert_margin: 2.0
   critical_multiplier: 4.0
   deescalate_windows: 3
 
