@@ -1,7 +1,7 @@
 # Any change done, to apply a core-service restart is required. The service will be 
 # restarted automatically if the config file is changed.
 
-run_label: "tapo-idle-24h"
+run_label: "plug-node-01-learn"
 
 paths:
   db: /srv/sentri/sentri.db
@@ -91,4 +91,5 @@ enforcement:
 ground_truth:
   # set to 60 seconds for injection tests
   poll_seconds: 300 
-  nodes: {}
+  nodes:
+    "ac:a7:04:f4:7e:dc": "192.168.50.185" # sentri-plug-01, ESP32-S3

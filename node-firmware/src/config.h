@@ -25,7 +25,9 @@ constexpr int REQ_MAX = 1400;
 
 #if SENTRI_PROFILE == PLUG
 constexpr char DEVICE_NAME[] = "sentri-plug-01";
-constexpr char CLOUD_HOST[] = "testserver.host";
+// testserver.host sends Keep-Alive: timeout=5, so a 40 s heartbeat can never hold a
+// persistent socket there. httpbin serves the same /bytes/{n} api and survives the gap
+constexpr char CLOUD_HOST[] = "httpbin.org";
 constexpr uint16_t CLOUD_PORT = 443;
 constexpr bool PERSISTENT = true;
 constexpr uint32_t PRIMARY_MS = 40000;

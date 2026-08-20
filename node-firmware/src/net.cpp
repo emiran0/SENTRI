@@ -42,6 +42,8 @@ static void gratuitous_arp() {
 static bool wifi_join() {
   WiFi.mode(WIFI_STA);
   WiFi.setHostname(DEVICE_NAME);
+  // modem sleep lets the AP buffer replies for a DTIM interval, which lands in std_iat_out
+  WiFi.setSleep(false);
   WiFi.begin(WIFI_SSID, WIFI_PASS);
   uint32_t start = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - start < 20000) delay(200);
