@@ -58,7 +58,9 @@ def cmd_refit(conn, conf, args):
         # a stateless per window severity, so a false positive count is one GROUP BY,
         # and the stored novelty reflects the old destination set so it is not replayed
         tier = "normal"
-        if d2 >= thresholds["t_critical"]:
+        if not score.trusted_distance(window["packets"], window["complete"], conf):
+            tier = "unusable"
+        elif d2 >= thresholds["t_critical"]:
             tier = "block"
         elif d2 >= thresholds["t_alert"]:
             tier = "alert"

@@ -74,7 +74,12 @@ variance_floors:
   std_iat_out: 0.005
   frac_small_out: 0.01
   frac_large_out: 0.01
-  distinct_peers: 0.01
+  # distinct_peers counts destination keys, so its smallest possible difference is one
+  # peer, and it is a log1p feature: log1p(2) - log1p(1) = 0.4055. the old 0.01 was the
+  # raw space value left behind when the feature moved into the log set, which declared a
+  # one peer change to be 40 to 70 sigma and sent every ordinary cloud endpoint rotation
+  # straight to block. do not lower this without re-reading the log1p note above
+  distinct_peers: 0.4055
   tcp_syn_rate: 0.01
 
 enforcement:

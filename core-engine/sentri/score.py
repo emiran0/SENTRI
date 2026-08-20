@@ -40,17 +40,29 @@ def hard_novelty(keys):
     return any(not k.startswith("p:") for k in keys)
 
 
+# learning fits only complete, non empty windows, so a truncated or silent window has no
+# distribution behind its distance and the distance must be ignored. its novelty is still
+# real: a domain is a domain whether the window ran 105 seconds or 300
+def trusted_distance(packets, complete, conf):
+    return bool(complete) and (bool(packets) or conf["learning"]["learn_include_empty"])
+
+
 # count is a signed streak: positive counts anomalous windows, negative counts normal ones
-def decide_tier(tier, count, d2, thresholds, hits, hits_before, conf):
-    anomalous = d2 >= thresholds["t_alert"] or bool(hits)
+def decide_tier(tier, count, d2, thresholds, hits, hits_before, trusted, conf):
+    far = trusted and d2 >= thresholds["t_alert"]
+    anomalous = far or bool(hits)
     if anomalous:
         count = count + 1 if count > 0 else 1
     else:
         count = count - 1 if count < 0 else -1
     hard = [h for h in hits if not h.startswith("new_prefix")]
-    if d2 >= thresholds["t_critical"] or (hard and hits_before):
+    # the distance was the only route to block that could act on a single window. it now
+    # takes the same two window agreement the novelty route already required, so one heavy
+    # reconnect alerts and only a sustained deviation enforces
+    critical = trusted and d2 >= thresholds["t_critical"] and count >= 2
+    if critical or (hard and hits_before):
         new = "block"
-    elif count >= 2 and (d2 >= thresholds["t_alert"] or hits):
+    elif count >= 2 and anomalous:
         new = "throttle"
     elif anomalous:
         new = "alert"
@@ -65,7 +77,9 @@ def decide_tier(tier, count, d2, thresholds, hits, hits_before, conf):
     return new, count
 
 
-def reason(d2, thresholds, hits):
+def reason(d2, thresholds, hits, trusted=True):
     head = "d2 %.1f (alert %.1f, critical %.1f)" % (d2, thresholds["t_alert"],
                                                     thresholds["t_critical"])
+    if not trusted:
+        head += " [distance ignored, window not usable]"
     return ", ".join([head] + hits)

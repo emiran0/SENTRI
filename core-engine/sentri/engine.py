@@ -86,7 +86,9 @@ def process_window(conn, conf, dnslog, mac, window_start, duration, pkts, ip):
     if dev["state"] == "learning":
         check_learning(conn, conf, mac, dev, window_start)
     elif base:
-        monitor(conn, conf, mac, dev, window_id, window_start, feats, base, hits, previous)
+        trusted = score.trusted_distance(len(pkts), complete, conf)
+        monitor(conn, conf, mac, dev, window_id, window_start, feats, base, hits, previous,
+                trusted)
 
 
 def check_learning(conn, conf, mac, dev, now):
@@ -107,16 +109,17 @@ def check_learning(conn, conf, mac, dev, now):
                  "baseline %d fitted%s" % (baseline_id, ", hard stop" if forced else ""), status)
 
 
-def monitor(conn, conf, mac, dev, window_id, window_start, feats, base, hits, previous):
+def monitor(conn, conf, mac, dev, window_id, window_start, feats, base, hits, previous,
+            trusted):
     d2, contributions, zscores = score.distance(extract.to_vector(feats, base["names"]), base)
     before = score.hard_novelty(json.loads(previous["new_dests_json"])) if previous else False
     tier, count = score.decide_tier(dev["tier"], dev["consecutive_count"], d2,
-                                    base["thresholds"], hits, before, conf)
+                                    base["thresholds"], hits, before, trusted, conf)
     db.add_score(conn, window_id, base["id"], mac, d2, tier, contributions, zscores)
     db.update_device(conn, mac, tier=tier, consecutive_count=count)
     if tier == dev["tier"]:
         return
-    summary = score.reason(d2, base["thresholds"], hits)
+    summary = score.reason(d2, base["thresholds"], hits, trusted)
     db.add_event(conn, mac, window_start, tier, "tier_change", summary,
                  {"from": dev["tier"], "top": contributions})
     db.add_enforcement(conn, mac, tier, summary)
