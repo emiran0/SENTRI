@@ -16,25 +16,28 @@ static LogEntry entries[LOG_ENTRIES];
 static int head = 0;
 static int stored = 0;
 
-static LogEntry *push() {
+static LogEntry *push_at(uint64_t t) {
   LogEntry *e = &entries[head];
   head = (head + 1) % LOG_ENTRIES;
   if (stored < LOG_ENTRIES) stored++;
   memset(e, 0, sizeof(LogEntry));
-  e->t = epoch_ms();
+  e->t = t;
   e->bytes = -1;
   return e;
 }
 
-void gt_log(const char *cls, const char *action, int bytes) {
-  LogEntry *e = push();
+// the caller passes the instant, so a send is stamped before its first byte leaves
+void gt_log_at(const char *cls, const char *action, int bytes, uint64_t t) {
+  LogEntry *e = push_at(t);
   strncpy(e->cls, cls, sizeof(e->cls) - 1);
   strncpy(e->action, action, sizeof(e->action) - 1);
   e->bytes = bytes;
 }
 
+void gt_log(const char *cls, const char *action, int bytes) { gt_log_at(cls, action, bytes, epoch_ms()); }
+
 void gt_log_anomaly(const char *action, const char *type, float mag) {
-  LogEntry *e = push();
+  LogEntry *e = push_at(epoch_ms());
   strncpy(e->cls, "anomaly", sizeof(e->cls) - 1);
   strncpy(e->action, action, sizeof(e->action) - 1);
   strncpy(e->type, type, sizeof(e->type) - 1);

@@ -26,6 +26,8 @@ static void walk() {
 
 static bool one_shot(const char *cls, const char *method, const char *path, const char *body,
                      int body_len, int out_bytes) {
+  // this profile opens a socket per report, so the report starts at the SYN, not the POST
+  uint64_t t_sent = epoch_ms();
   if (!net_open(CLOUD_HOST, cloud_port())) {
     gt_log(cls, "failed", 0);
     return false;
@@ -33,7 +35,7 @@ static bool one_shot(const char *cls, const char *method, const char *path, cons
   int sent = send_request(method, path, CLOUD_HOST, body, body_len, out_bytes);
   net_recv(5000);
   net_close();
-  gt_log(cls, "sent", sent);
+  gt_log_at(cls, "sent", sent, t_sent);
   return true;
 }
 

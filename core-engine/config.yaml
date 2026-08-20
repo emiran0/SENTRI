@@ -1,4 +1,4 @@
-# Any change done, to apply a core-service restart is required. The service will be 
+# Any change done, to apply a core-service restart is required. The service will be
 # restarted automatically if the config file is changed.
 
 run_label: "plug-node-01-learn"
@@ -20,7 +20,7 @@ network:
 
 exclude:
   macs:
-    - "94:83:c4:8e:7b:80" # Opal 2 (5GHz) MAC 
+    - "94:83:c4:8e:7b:80" # Opal 2 (5GHz) MAC
     - "4a:aa:14:4b:bb:93" # Laptop MAC
     - "9c:69:d3:92:4b:9a" # eth1 MAC / Opal
     - "8e:49:76:ec:72:83" # Phone MAC
@@ -90,6 +90,7 @@ enforcement:
 
 ground_truth:
   # set to 60 seconds for injection tests
-  poll_seconds: 300 
+  poll_seconds: 300
   nodes:
     "ac:a7:04:f4:7e:dc": "192.168.50.185" # sentri-plug-01, ESP32-S3
+    "1c:db:d4:75:b7:44": "192.168.50.189" # sentri-sensor-01, XIAO ESP32-S3

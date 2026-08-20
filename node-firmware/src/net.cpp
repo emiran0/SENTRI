@@ -148,13 +148,14 @@ bool cloud_exchange(const char *cls, int out_bytes, int in_bytes) {
   if (!net_ensure()) return false;
   char path[32];
   snprintf(path, sizeof(path), "/bytes/%d", in_bytes);
+  uint64_t t_sent = epoch_ms();
   int sent = send_request("GET", path, CLOUD_HOST, nullptr, 0, out_bytes);
   int got = net_recv(3000);
   if (got <= 0) {
     net_close();
     return false;
   }
-  gt_log(cls, "sent", sent);
+  gt_log_at(cls, "sent", sent, t_sent);
   return true;
 }
 
@@ -202,6 +203,8 @@ void net_beacon() {
   WiFiClientSecure beacon;
   beacon.setInsecure();
   beacon.setTimeout(3000);
+  // the SYN to the beacon address is already the anomaly, so stamp before connecting
+  uint64_t t_sent = epoch_ms();
   if (!beacon.connect(BEACON_HOST, BEACON_PORT)) {
     gt_log("beacon", "failed", 0);
     return;
@@ -211,7 +214,7 @@ void net_beacon() {
                    BEACON_HOST);
   beacon.write((const uint8_t *)req, n);
   beacon.stop();
-  gt_log("beacon", "sent", n);
+  gt_log_at("beacon", "sent", n, t_sent);
 }
 
 bool net_boot() {

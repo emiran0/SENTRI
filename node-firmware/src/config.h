@@ -25,8 +25,7 @@ constexpr int REQ_MAX = 1400;
 
 #if SENTRI_PROFILE == PLUG
 constexpr char DEVICE_NAME[] = "sentri-plug-01";
-// testserver.host sends Keep-Alive: timeout=5, so a 40 s heartbeat can never hold a
-// persistent socket there. httpbin serves the same /bytes/{n} api and survives the gap
+// testserver.host closes idle sockets at 5 s, httpbin holds them and serves the same /bytes/{n}
 constexpr char CLOUD_HOST[] = "httpbin.org";
 constexpr uint16_t CLOUD_PORT = 443;
 constexpr bool PERSISTENT = true;
@@ -48,7 +47,8 @@ constexpr uint32_t DNS_MS = 1800000;
 
 #elif SENTRI_PROFILE == SENSOR
 constexpr char DEVICE_NAME[] = "sentri-sensor-01";
-constexpr char CLOUD_HOST[] = "httpbin.org";
+// this profile opens a socket per report, so the 5 s keep-alive timeout here does not apply
+constexpr char CLOUD_HOST[] = "testserver.host";
 constexpr uint16_t CLOUD_PORT = 443;
 constexpr bool PERSISTENT = false;
 constexpr uint32_t PRIMARY_MS = 90000;
@@ -120,6 +120,7 @@ void media_pump();
 void control_begin();
 void control_poll();
 void gt_log(const char *cls, const char *action, int bytes);
+void gt_log_at(const char *cls, const char *action, int bytes, uint64_t t);
 void gt_log_anomaly(const char *action, const char *type, float mag);
 void anomaly_apply(const char *type, float magnitude, uint32_t duration_ms);
 void anomaly_check();
