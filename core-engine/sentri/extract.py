@@ -51,8 +51,10 @@ class DnsLog:
         self.names = {}
         self.pending = {}
         self.chain = None
+        self.now = 0
 
     def refresh(self, now):
+        self.now = now
         if not self.path or not os.path.exists(self.path):
             return
         size = os.path.getsize(self.path)
@@ -84,7 +86,14 @@ class DnsLog:
 
     def lookup(self, client_ip, peer_ip):
         hit = self.names.get((client_ip, peer_ip))
-        return hit[0] if hit else None
+        if not hit:
+            return None
+        # the expiry is meant to forget endpoints a device stopped using, so contact keeps a
+        # mapping alive. without this a long lived connection outlives its own dns answer and
+        # the destination silently re-keys from the domain to a /24 prefix
+        if self.now > hit[1]:
+            self.names[(client_ip, peer_ip)] = (hit[0], self.now)
+        return hit[0]
 
 
 def dest_key(device_ip, peer_ip, dnslog):

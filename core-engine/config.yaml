@@ -1,7 +1,7 @@
 # Any change done, to apply a core-service restart is required. The service will be
 # restarted automatically if the config file is changed.
 
-run_label: "plug-node-01-learn"
+run_label: "four-node-learn-24h"
 
 paths:
   db: /srv/sentri/sentri.db
