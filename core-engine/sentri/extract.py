@@ -26,6 +26,9 @@ LOG_FEATURES = frozenset((
 
 INFRA_PORTS = {53: "dns_count", 67: "dhcp_count", 68: "dhcp_count", 123: "ntp_count"}
 
+# dnsmasq answers an address under three verbs, and roughly half of them are cache hits
+ANSWER_VERBS = frozenset(("reply", "cached", "cached-stale"))
+
 MULTI_SUFFIXES = frozenset((
     "co.uk", "org.uk", "ac.uk", "gov.uk", "com.au", "net.au", "co.nz",
     "co.jp", "com.br", "co.za", "com.tr", "com.cn",
@@ -71,7 +74,7 @@ class DnsLog:
         if parts[4].startswith("query[") and parts[6] == "from":
             self.pending[parts[5]] = (parts[7], now)
             self.chain = (parts[7], parts[5])
-        elif parts[4] == "reply" and parts[6] == "is":
+        elif parts[4] in ANSWER_VERBS and parts[6] == "is":
             asked = self.pending.get(parts[5])
             if asked:
                 self.chain = (asked[0], parts[5])

@@ -109,7 +109,7 @@ def check_learning(conn, conf, mac, dev, now):
 
 def monitor(conn, conf, mac, dev, window_id, window_start, feats, base, hits, previous):
     d2, contributions, zscores = score.distance(extract.to_vector(feats, base["names"]), base)
-    before = bool(json.loads(previous["new_dests_json"])) if previous else False
+    before = score.hard_novelty(json.loads(previous["new_dests_json"])) if previous else False
     tier, count = score.decide_tier(dev["tier"], dev["consecutive_count"], d2,
                                     base["thresholds"], hits, before, conf)
     db.add_score(conn, window_id, base["id"], mac, d2, tier, contributions, zscores)

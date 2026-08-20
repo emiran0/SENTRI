@@ -35,6 +35,11 @@ def discrete_hits(new_dests, new_services):
     return hits + ["new_service " + s for s in new_services]
 
 
+# a new prefix is address rotation under a known domain, it can alert and throttle, never block
+def hard_novelty(keys):
+    return any(not k.startswith("p:") for k in keys)
+
+
 # count is a signed streak: positive counts anomalous windows, negative counts normal ones
 def decide_tier(tier, count, d2, thresholds, hits, hits_before, conf):
     anomalous = d2 >= thresholds["t_alert"] or bool(hits)
@@ -42,9 +47,10 @@ def decide_tier(tier, count, d2, thresholds, hits, hits_before, conf):
         count = count + 1 if count > 0 else 1
     else:
         count = count - 1 if count < 0 else -1
-    if d2 >= thresholds["t_critical"] or (hits and hits_before):
+    hard = [h for h in hits if not h.startswith("new_prefix")]
+    if d2 >= thresholds["t_critical"] or (hard and hits_before):
         new = "block"
-    elif count >= 2 and d2 >= thresholds["t_alert"]:
+    elif count >= 2 and (d2 >= thresholds["t_alert"] or hits):
         new = "throttle"
     elif anomalous:
         new = "alert"

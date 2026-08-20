@@ -48,7 +48,7 @@ def cmd_refit(conn, conf, args):
     baseline_id = baseline.fit(conn, args.mac, dev, conf, forced=True)
     if baseline_id is None:
         return
-    db.update_device(conn, args.mac, baseline_id=baseline_id)
+    db.update_device(conn, args.mac, state="monitoring", baseline_id=baseline_id)
     base = baseline.load(conn, args.mac)
     thresholds = base["thresholds"]
     for window in db.learning_windows(conn, args.mac, 0):
