@@ -52,11 +52,25 @@ class DnsLog:
         self.pending = {}
         self.chain = None
         self.now = 0
+        self.seeded = False
+
+    # the log rotates daily, so a restart would otherwise lose every mapping for a device
+    # that last resolved before the rotation
+    def seed(self, now):
+        previous = self.path + ".1"
+        if not os.path.exists(previous):
+            return
+        with open(previous, errors="ignore") as f:
+            for line in f:
+                self.feed(line, now)
 
     def refresh(self, now):
         self.now = now
         if not self.path or not os.path.exists(self.path):
             return
+        if not self.seeded:
+            self.seed(now)
+            self.seeded = True
         size = os.path.getsize(self.path)
         if size < self.offset:
             self.offset = 0
