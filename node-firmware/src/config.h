@@ -24,9 +24,15 @@ constexpr int LOG_ENTRIES = 64;
 constexpr int REQ_MAX = 1400;
 
 #if SENTRI_PROFILE == PLUG
+#if PLUG_ID == 2
+constexpr char DEVICE_NAME[] = "sentri-plug-02";
+// same traffic shape as plug-01 on a different operator, so the endpoint is the only variable
+constexpr char CLOUD_HOST[] = "httpbin.dev";
+#else
 constexpr char DEVICE_NAME[] = "sentri-plug-01";
 // testserver.host closes idle sockets at 5 s, httpbin holds them and serves the same /bytes/{n}
 constexpr char CLOUD_HOST[] = "httpbin.org";
+#endif
 constexpr uint16_t CLOUD_PORT = 443;
 constexpr bool PERSISTENT = true;
 constexpr uint32_t PRIMARY_MS = 40000;
