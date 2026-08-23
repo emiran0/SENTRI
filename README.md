@@ -1,4 +1,5 @@
-# SENTRI
+![project_banner_img](sentri_banner.jpg)
+
 
 SENTRI learns what each IoT device on a network normally does, scores every five minute
 window of its traffic against that baseline, and restricts the device when it deviates.
@@ -38,7 +39,7 @@ can be retuned by re-scoring stored windows instead of recapturing traffic.
 | Path | Contents |
 | --- | --- |
 | `core-engine/` | The Python engine: capture, feature extraction, learning and fit, scoring, tier decisions, nftables enforcement, and the CLI. |
-| `node-firmware/` | Firmware for the instrumented nodes used as ground truth, in three profiles: plug and camera on ESP32, sensor on Pico 2W. Each emulates a device behaviour and can inject labelled anomalies on command. |
+| `node-firmware/` | Firmware for the instrumented nodes used as ground truth, on ESP32 class hardware. Two profiles are deployed, plug and sensor; a third, camera, is written but not built out. Each emulates a device behaviour and can inject labelled anomalies on command. |
 | `dashboard/` | Read only view over the database. Planned. |
 
 ## Ground truth
