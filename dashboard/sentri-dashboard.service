@@ -1,0 +1,19 @@
+[Unit]
+Description=SENTRI local dashboard
+After=network-online.target sentri.service
+
+[Service]
+Type=simple
+# unprivileged on purpose: the dashboard opens the database read only and never calls nft
+User=emiran
+WorkingDirectory=/home/emiran/SENTRI/core-engine
+ExecStart=/home/emiran/SENTRI/core-engine/.venv/bin/python /home/emiran/SENTRI/dashboard/serve.py
+# for access from the tailnet, swap the line above for this one. never --host 0.0.0.0:
+# this box holds 192.168.50.1, so binding everywhere serves the capture history to the
+# IoT subnet the system is watching
+# ExecStart=/home/emiran/SENTRI/core-engine/.venv/bin/python /home/emiran/SENTRI/dashboard/serve.py --host 100.114.140.57
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

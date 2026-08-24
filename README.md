@@ -40,7 +40,7 @@ can be retuned by re-scoring stored windows instead of recapturing traffic.
 | --- | --- |
 | `core-engine/` | The Python engine: capture, feature extraction, learning and fit, scoring, tier decisions, nftables enforcement, and the CLI. |
 | `node-firmware/` | Firmware for the instrumented nodes used as ground truth, on ESP32 class hardware. Two profiles are deployed, plug and sensor; a third, camera, is written but not built out. Each emulates a device behaviour and can inject labelled anomalies on command. |
-| `dashboard/` | Read only view over the database. Planned. |
+| `dashboard/` | Local, read only web view over the database: capture and engine health, per device distance against its own baseline, events and enforcement. Operator instrument, not part of the method. |
 
 ## Ground truth
 

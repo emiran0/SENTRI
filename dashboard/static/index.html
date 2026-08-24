@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SENTRI</title>
+<link rel="stylesheet" href="style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='13' font-size='13'>&#128225;</text></svg>">
+</head>
+<body>
+<header class="bar">
+  <div class="brand">
+    <span class="dot" id="pulse" aria-hidden="true"></span>
+    <h1>SENTRI</h1>
+    <span class="label" id="run-label"></span>
+  </div>
+  <div class="bar-right">
+    <span class="chip" id="mode-chip" title="enforcement mode from config.yaml"></span>
+    <span class="muted" id="updated"></span>
+    <span class="muted" id="countdown" title="the engine only closes a window every 300s, so most polls find nothing new"></span>
+    <button id="pause" class="ghost" type="button" aria-pressed="false">pause</button>
+    <button id="theme" class="ghost" type="button" title="light or dark">theme</button>
+  </div>
+</header>
+
+<div id="banner" class="banner" hidden></div>
+
+<main>
+  <section aria-labelledby="health-h">
+    <h2 id="health-h" class="section-h">Health</h2>
+    <div class="tiles" id="health"></div>
+  </section>
+
+  <section aria-labelledby="devices-h">
+    <div class="section-bar">
+      <h2 id="devices-h" class="section-h">Devices</h2>
+      <div class="controls" role="group" aria-label="chart time range">
+        <span class="muted">range</span>
+        <button class="range" data-hours="3" type="button">3h</button>
+        <button class="range" data-hours="12" type="button">12h</button>
+        <button class="range" data-hours="24" type="button">24h</button>
+        <button class="range" data-hours="72" type="button">3d</button>
+        <button class="range" data-hours="168" type="button">7d</button>
+      </div>
+    </div>
+    <p class="note">
+      Distance is squared Mahalanobis against the device's own frozen baseline. Each chart
+      has its own thresholds, so the panels are deliberately not on a shared axis.
+    </p>
+    <div class="legend" id="mark-legend"></div>
+    <div id="devices"></div>
+  </section>
+
+  <div class="split">
+    <section aria-labelledby="events-h">
+      <h2 id="events-h" class="section-h">Events</h2>
+      <div id="events" class="feed"></div>
+    </section>
+    <section aria-labelledby="enf-h">
+      <h2 id="enf-h" class="section-h">Enforcement history</h2>
+      <div id="enforcement" class="feed"></div>
+    </section>
+  </div>
+
+  <section aria-labelledby="log-h">
+    <details id="log-details">
+      <summary><h2 id="log-h" class="section-h inline">Engine log</h2></summary>
+      <pre id="log" class="log">loading</pre>
+    </details>
+  </section>
+</main>
+
+<div id="tooltip" class="tooltip" hidden role="status"></div>
+<script src="app.js"></script>
+</body>
+</html>
