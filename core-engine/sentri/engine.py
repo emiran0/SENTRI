@@ -45,15 +45,21 @@ def run(conf):
 
 
 def process_chunk(conn, conf, dnslog, windower, path, start):
+    t0 = time.monotonic()
     dnslog.refresh(start)
     packets, device_ips = extract.parse_chunk(path, conf)
+    t_parse = time.monotonic()
     windower.add(packets)
     windower.advance(start + extract.WINDOW_SECONDS)
     for mac, window_start, duration, pkts in windower.ready():
         process_window(conn, conf, dnslog, mac, window_start, duration, pkts,
                        device_ips.get(mac))
-    log.info("chunk %s: %d packets, %d devices", os.path.basename(path), len(packets),
-             len(device_ips))
+    # the load bearing resource figure is this against the 300 s rotation period: if it
+    # approaches the period the Pi cannot keep up in real time. section 20 of the
+    # methodology notes reports it as a duty cycle, so it has to be logged per chunk
+    elapsed = time.monotonic() - t0
+    log.info("chunk %s: %d packets, %d devices, parse %.2fs, in %.2fs",
+             os.path.basename(path), len(packets), len(device_ips), t_parse - t0, elapsed)
 
 
 def process_window(conn, conf, dnslog, mac, window_start, duration, pkts, ip):
@@ -104,7 +110,7 @@ def check_learning(conn, conf, mac, dev, now):
     if baseline_id is None:
         return
     db.update_device(conn, mac, state="monitoring", baseline_id=baseline_id, tier="normal",
-                     consecutive_count=0)
+                     consecutive_count=0, recent_flags=0)
     db.add_event(conn, mac, now, "normal", "learning_done",
                  "baseline %d fitted%s" % (baseline_id, ", hard stop" if forced else ""), status)
 
@@ -113,10 +119,18 @@ def monitor(conn, conf, mac, dev, window_id, window_start, feats, base, hits, pr
             trusted):
     d2, contributions, zscores = score.distance(extract.to_vector(feats, base["names"]), base)
     before = score.hard_novelty(json.loads(previous["new_dests_json"])) if previous else False
-    tier, count = score.decide_tier(dev["tier"], dev["consecutive_count"], d2,
-                                    base["thresholds"], hits, before, trusted, conf)
+    # the score is still recorded, so nothing is lost from the evaluation record, but a
+    # window the operator has already overruled must not move the tier or the streak
+    if score.superseded_by_clear(window_start, dev["cleared_at"]):
+        db.add_score(conn, window_id, base["id"], mac, d2, dev["tier"], contributions, zscores)
+        log.info("%s window %d predates the operator clear, tier decision skipped (d2 %.1f)",
+                 mac, window_start, d2)
+        return
+    tier, count, recent = score.decide_tier(dev["tier"], dev["consecutive_count"], d2,
+                                            base["thresholds"], hits, before, trusted, conf,
+                                            dev["recent_flags"] or 0)
     db.add_score(conn, window_id, base["id"], mac, d2, tier, contributions, zscores)
-    db.update_device(conn, mac, tier=tier, consecutive_count=count)
+    db.update_device(conn, mac, tier=tier, consecutive_count=count, recent_flags=recent)
     if tier == dev["tier"]:
         return
     summary = score.reason(d2, base["thresholds"], hits, trusted)
@@ -136,7 +150,9 @@ def auto_clear(conn, conf):
         dev = db.get_device(conn, row["mac"])
         enforce.clear(row["mac"], dev["ip"] if dev else None)
         db.add_enforcement(conn, row["mac"], "normal", "auto clear")
-        db.update_device(conn, row["mac"], tier="normal", consecutive_count=0)
+        # auto clear is an authoritative clear too, so queued windows must not undo it
+        db.update_device(conn, row["mac"], tier="normal", consecutive_count=0, recent_flags=0,
+                         cleared_at=now)
         db.add_event(conn, row["mac"], now, "normal", "auto_clear",
                      "enforcement expired after %.1f h" % (conf["enforcement"]["auto_clear_hours"],), {})
 

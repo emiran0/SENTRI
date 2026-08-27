@@ -1,7 +1,10 @@
 # Any change done, to apply a core-service restart is required. The service will be
 # restarted automatically if the config file is changed.
 
-run_label: "four-node-learn-24h"
+# phase 3 of the run plan, section 21: the injection campaign, in observe mode so that a
+# trial cannot enforce and perturb the trial after it. phase 4 (enforcement verification)
+# completed 2026-08-25 under label enforce-verify. every analysis filters on this label
+run_label: "inject-3rep"
 
 paths:
   db: /srv/sentri/sentri.db
@@ -60,6 +63,16 @@ thresholds:
   # on both devices and still blocks a 4x cadence injection
   critical_multiplier: 10.0
   deescalate_windows: 3
+  # escalate to throttle when escalate_hits of the last escalate_window windows were
+  # anomalous. 2 of 2 is the old consecutive-window rule, and it missed every live
+  # injection on 2026-08-25: a sustained volume anomaly cleared t_alert in two windows out
+  # of three with the gap in the middle, so the streak reset each time and nothing ever
+  # passed alert. 2 of 3 escalates both of those trials at the third window and costs four
+  # extra throttle-level escalations across four devices over three days, measured on the
+  # pre-campaign normal history. do not widen to 2 of 4 without re-measuring, it roughly
+  # doubles the false escalations again
+  escalate_window: 3
+  escalate_hits: 2
 
 # smallest physically meaningful difference per feature, in the feature's model
 # space (log1p applied where the feature table says so), used as a standard deviation
@@ -83,14 +96,22 @@ variance_floors:
   tcp_syn_rate: 0.01
 
 enforcement:
+  # back to observe for the injection campaign. section 21 is explicit that phase 3 runs in
+  # observe deliberately: if a trial enforced, a throttle would change the traffic the next
+  # trial sees and the trials would stop being independent. enforce is for phase 4 only
   mode: observe
   never_enforce:
     - "aa:bb:cc:dd:ee:ff"
+    # section 17 requires both commercial MACs here for the whole of phase 4. they are the
+    # uncontrolled realism anchor for RQ2 and a vendor check-in must never cost one of them
+    # mid-experiment. inert in observe mode, so it is here early on purpose
+    - "0c:ef:15:25:af:1a" # Tapo P100 plug
+    - "e0:d3:62:fb:cb:97" # Tapo L630 bulb
   auto_clear_hours: 2
 
 ground_truth:
   # set to 60 seconds for injection tests
-  poll_seconds: 300
+  poll_seconds: 60
   nodes:
     "ac:a7:04:f4:7e:dc": "192.168.50.185" # sentri-plug-01, ESP32-S3
     "1c:db:d4:75:b7:44": "192.168.50.189" # sentri-sensor-01, XIAO ESP32-S3

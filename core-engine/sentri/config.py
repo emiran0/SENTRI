@@ -23,6 +23,11 @@ DEFAULTS = {
         "alert_margin": 2.0,
         "critical_multiplier": 4.0,
         "deescalate_windows": 3,
+        # escalate when `escalate_hits` of the last `escalate_window` windows were
+        # anomalous. 2 of 2 is the consecutive-window rule, so the default preserves the
+        # old behaviour and a wider span has to be asked for
+        "escalate_window": 2,
+        "escalate_hits": 2,
     },
     "model_features": ["bytes_out_rate", "bytes_in_rate", "mean_pkt_size_out",
                        "mean_iat_out", "std_iat_out", "distinct_peers"],

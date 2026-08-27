@@ -77,7 +77,12 @@ def cmd_unblock(conn, conf, args):
     for dev in targets:
         enforce.clear(dev["mac"], dev["ip"])
         db.add_enforcement(conn, dev["mac"], "normal", "manual unblock")
-        db.update_device(conn, dev["mac"], tier="normal", consecutive_count=0)
+        # recent_flags has to clear with the streak, or the next anomalous window lands on
+        # a primed escalation window and re-enforces immediately after a manual clear.
+        # cleared_at makes the operator's decision authoritative over the windows still in
+        # the capture queue, which are minutes old and describe the state just overruled
+        db.update_device(conn, dev["mac"], tier="normal", consecutive_count=0, recent_flags=0,
+                         cleared_at=time.time())
         db.add_event(conn, dev["mac"], time.time(), "normal", "unblock", "manual unblock", {})
         print("cleared %s" % dev["mac"])
 

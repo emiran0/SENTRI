@@ -51,6 +51,11 @@ def connect(path):
     conn.execute("PRAGMA synchronous = NORMAL")
     conn.executescript(SCHEMA)
     ensure_column(conn, "baselines", "feature_names_json", "TEXT")
+    # bitmask of the last few tier decisions, so escalation can tolerate a gap
+    ensure_column(conn, "devices", "recent_flags", "INTEGER DEFAULT 0")
+    # when an operator last cleared this device, so queued windows captured before the
+    # clear cannot re-enforce it
+    ensure_column(conn, "devices", "cleared_at", "REAL")
     return conn
 
 

@@ -47,22 +47,42 @@ def trusted_distance(packets, complete, conf):
     return bool(complete) and (bool(packets) or conf["learning"]["learn_include_empty"])
 
 
-# count is a signed streak: positive counts anomalous windows, negative counts normal ones
-def decide_tier(tier, count, d2, thresholds, hits, hits_before, trusted, conf):
+# an operator clear is authoritative. the capture to score path is several minutes deep, so
+# when an operator clears a device there are still windows in the queue that were captured
+# while enforcement was in force. those windows describe exactly the state the operator just
+# overruled, and scoring them re-enforces a device that has already been cleared. measured
+# 2026-08-25: a manual unblock at 18:14 was reversed at 18:19 by two windows captured before
+# it. a window that merely overlaps the clear is also suspect, so the test is on its start.
+def superseded_by_clear(window_start, cleared_at):
+    return bool(cleared_at) and window_start < cleared_at
+
+
+# count is a signed streak: positive counts anomalous windows, negative counts normal ones.
+# recent is a bitmask of the last `escalate_window` decisions, newest in bit 0, which is
+# what lets escalation tolerate a gap. a consecutive streak cannot: measured on the live
+# injections of 2026-08-25, a sustained volume anomaly cleared the threshold in two windows
+# out of three with the gap in the middle, so the streak reset every time and a real
+# anomaly never escalated. see docs/2026-08-25_live-injection-campaign.md
+def decide_tier(tier, count, d2, thresholds, hits, hits_before, trusted, conf, recent=0):
+    rules = conf["thresholds"]
+    span = max(1, int(rules.get("escalate_window", 2)))
+    need = max(1, int(rules.get("escalate_hits", 2)))
     far = trusted and d2 >= thresholds["t_alert"]
     anomalous = far or bool(hits)
     if anomalous:
         count = count + 1 if count > 0 else 1
     else:
         count = count - 1 if count < 0 else -1
+    recent = ((recent << 1) | int(anomalous)) & ((1 << span) - 1)
+    agree = bin(recent).count("1")
     hard = [h for h in hits if not h.startswith("new_prefix")]
     # the distance was the only route to block that could act on a single window. it now
-    # takes the same two window agreement the novelty route already required, so one heavy
-    # reconnect alerts and only a sustained deviation enforces
-    critical = trusted and d2 >= thresholds["t_critical"] and count >= 2
+    # takes the same agreement the novelty route already required, so one heavy reconnect
+    # alerts and only a sustained deviation enforces
+    critical = trusted and d2 >= thresholds["t_critical"] and agree >= need
     if critical or (hard and hits_before):
         new = "block"
-    elif count >= 2 and anomalous:
+    elif agree >= need and anomalous:
         new = "throttle"
     elif anomalous:
         new = "alert"
@@ -74,7 +94,7 @@ def decide_tier(tier, count, d2, thresholds, hits, hits_before, trusted, conf):
     # a device only ever steps down one tier at a time, never straight to normal
     if TIERS.index(new) < TIERS.index(tier) and anomalous:
         new = tier
-    return new, count
+    return new, count, recent
 
 
 def reason(d2, thresholds, hits, trusted=True):
