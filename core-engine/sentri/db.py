@@ -85,8 +85,14 @@ def all_devices(conn):
 
 
 def add_device(conn, mac, ip, ts):
+    # named columns, not positional VALUES: ensure_column appends to this table as the
+    # schema grows, and a positional insert silently goes wrong the first time a new device
+    # appears after a migration. it broke on the first replay, which was the first new
+    # device enrolled since recent_flags and cleared_at were added
     conn.execute(
-        "INSERT INTO devices VALUES (?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO devices (mac, ip, name, state, first_seen, last_seen, tier,"
+        " consecutive_count, learning_started, baseline_id)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?)",
         (mac, ip, mac, "learning", ts, ts, "normal", 0, ts, None),
     )
     conn.commit()

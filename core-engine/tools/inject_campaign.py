@@ -73,6 +73,14 @@ PROTOCOL = [("protocol", 1.0)]
 SHORT = [("volume", 1.5), ("volume", 2.0), ("volume", 3.0),
          ("destination", 600000.0)]
 
+# the two rungs the ladder above defines but no campaign ever ran. volume stopped at 3x
+# against a specified 10x and cadence at 4x against a specified 16x, so neither curve has
+# an upper end and the figures stop where the campaign stopped rather than where the
+# response does. these are the next rung of each, run so the curves carry a point beyond
+# the knee. one repetition per cell matches how the existing cadence cells were run, so
+# the cadence series stays internally consistent at n=1
+TOP = [("volume", 5.0), ("cadence", 8.0)]
+
 
 def control(host, path, body=None, timeout=5, tries=3):
     """the node serves its control channel from the same loop that does blocking TLS, so a
@@ -186,7 +194,8 @@ def run_trial(node, name, kind, magnitude, out, offset=0, rep=1):
 def main(argv=None):
     global INJECT_WINDOWS, RECOVER_WINDOWS
     ap = argparse.ArgumentParser()
-    ap.add_argument("--plan", choices=("pilot", "full", "protocol", "short"), default="pilot")
+    ap.add_argument("--plan", choices=("pilot", "full", "protocol", "short", "top"),
+                    default="pilot")
     ap.add_argument("--node", default="plug-01", choices=sorted(NODES))
     ap.add_argument("--out", default=None)
     ap.add_argument("--status", action="store_true")
@@ -217,7 +226,8 @@ def main(argv=None):
             except (OSError, ValueError) as exc:
                 print("%-10s unreachable: %s" % (name, exc))
         return 0
-    trials = {"pilot": PILOT, "full": FULL, "protocol": PROTOCOL, "short": SHORT}[args.plan]
+    trials = {"pilot": PILOT, "full": FULL, "protocol": PROTOCOL, "short": SHORT,
+              "top": TOP}[args.plan]
     out = args.out or os.path.join(
         os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
         "research", "injections",

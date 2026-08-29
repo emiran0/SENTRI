@@ -44,6 +44,64 @@ def run(conf):
         time.sleep(conf["capture"]["poll_seconds"])
 
 
+def replay(conf, directory, limit=None):
+    """Section 18.1: drive the pipeline over an archived capture instead of a live one.
+
+    `capture.pending` cannot be reused. It filters on file mtime against wall clock, so a
+    downloaded capture is either always eligible or never; it tracks one global watermark;
+    and it writes to the production database. This iterates chunks in timestamp order with
+    none of that, against whatever database `paths.db` names, which for a replay must be a
+    separate file.
+
+    Everything downstream, extract through decide_tier, runs unmodified. That is the claim
+    RQ4 rests on, so nothing here may special-case the replay.
+    """
+    conn = db.connect(conf["paths"]["db"])
+    # no resolver log for an archived capture, so every destination keys by prefix. that is
+    # the benchmark condition itself, not a defect, and section 19 arm B is its control
+    dnslog = extract.DnsLog(conf["paths"].get("pihole_log") if conf["paths"] else None)
+    windower = extract.Windower([d["mac"] for d in db.all_devices(conn)])
+    chunks = []
+    for name in sorted(os.listdir(directory)):
+        if name.startswith(capture.CHUNK_PREFIX) and name.endswith(capture.CHUNK_SUFFIX):
+            chunks.append((os.path.join(directory, name), name, capture.chunk_time(name)))
+    chunks.sort(key=lambda c: c[2])
+    if limit:
+        chunks = chunks[:limit]
+    log.info("replay starting, %d chunks, label %s, db %s",
+             len(chunks), conf["run_label"], conf["paths"]["db"])
+    chunk_end = 0.0
+    ips = {}
+    for i, (path, name, start) in enumerate(chunks, 1):
+        # a live stream flushes window N when chunk N+1 arrives. An archived capture can be
+        # sparse, with hours between chunks, so a window whose successor never comes would
+        # sit in the buffer for ever and be lost. Flush before every gap, and again at the
+        # end, or a sparse dataset silently yields almost no windows.
+        if start - chunk_end > extract.WINDOW_SECONDS:
+            # only flush if a segment has actually run: before the first chunk the windower
+            # has no per-MAC position yet and ready() would dereference None
+            if chunk_end:
+                windower.advance(chunk_end + extract.WINDOW_SECONDS)
+                drain_windows(conn, conf, dnslog, windower, ips)
+            windower.start_segment(start)
+        ips = process_chunk(conn, conf, dnslog, windower, path, start) or ips
+        chunk_end = start + extract.WINDOW_SECONDS
+        if i % 50 == 0 or i == len(chunks):
+            log.info("replay %d/%d chunks", i, len(chunks))
+    windower.advance(chunk_end + extract.WINDOW_SECONDS)
+    drain_windows(conn, conf, dnslog, windower, ips)
+    for dev in db.all_devices(conn):
+        log.info("replay done: %s state=%s tier=%s baseline=%s",
+                 dev["mac"], dev["state"], dev["tier"], dev["baseline_id"])
+    return len(chunks)
+
+
+def drain_windows(conn, conf, dnslog, windower, device_ips):
+    for mac, window_start, duration, pkts in windower.ready():
+        process_window(conn, conf, dnslog, mac, window_start, duration, pkts,
+                       device_ips.get(mac))
+
+
 def process_chunk(conn, conf, dnslog, windower, path, start):
     t0 = time.monotonic()
     dnslog.refresh(start)
@@ -51,15 +109,15 @@ def process_chunk(conn, conf, dnslog, windower, path, start):
     t_parse = time.monotonic()
     windower.add(packets)
     windower.advance(start + extract.WINDOW_SECONDS)
-    for mac, window_start, duration, pkts in windower.ready():
-        process_window(conn, conf, dnslog, mac, window_start, duration, pkts,
-                       device_ips.get(mac))
+    drain_windows(conn, conf, dnslog, windower, device_ips)
     # the load bearing resource figure is this against the 300 s rotation period: if it
     # approaches the period the Pi cannot keep up in real time. section 20 of the
     # methodology notes reports it as a duty cycle, so it has to be logged per chunk
     elapsed = time.monotonic() - t0
     log.info("chunk %s: %d packets, %d devices, parse %.2fs, in %.2fs",
              os.path.basename(path), len(packets), len(device_ips), t_parse - t0, elapsed)
+    # returned so a replay can carry the address map across a gap and still flush windows
+    return device_ips
 
 
 def process_window(conn, conf, dnslog, mac, window_start, duration, pkts, ip):

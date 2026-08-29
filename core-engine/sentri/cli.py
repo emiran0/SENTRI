@@ -19,6 +19,19 @@ def cmd_run(conn, conf, args):
     engine.run(conf)
 
 
+def cmd_replay(conn, conf, args):
+    if conf["paths"]["db"] == "/srv/sentri/sentri.db":
+        print("refusing: a replay must write to its own database, pass --db")
+        return
+    if conf["enforcement"]["mode"] == "enforce":
+        print("refusing: replay runs in observe mode, a benchmark cannot be enforced against")
+        return
+    engine.setup_logging(conf)
+    n = engine.replay(conf, args.directory, args.limit)
+    print("replayed %d chunks into %s under label %s"
+          % (n, conf["paths"]["db"], conf["run_label"]))
+
+
 def cmd_status(conn, conf, args):
     active = enforce.list_active()
     print("%-18s %-11s %-9s %-9s %10s %s" % ("MAC", "STATE", "TIER", "COUNT", "D2", "ENFORCED"))
@@ -125,6 +138,11 @@ def flatten(row):
 def main():
     parser = argparse.ArgumentParser(prog="sentri")
     parser.add_argument("--config", default="config.yaml")
+    # a replay must not write into the live database, and a run label must not be shared
+    # between a live phase and a benchmark one. both are overridable per invocation so a
+    # replay needs no second config file
+    parser.add_argument("--db", default=None, help="override paths.db, required for replay")
+    parser.add_argument("--label", default=None, help="override run_label")
     subs = parser.add_subparsers(dest="command", required=True)
     subs.add_parser("init").set_defaults(func=cmd_init)
     subs.add_parser("run").set_defaults(func=cmd_run)
@@ -138,12 +156,20 @@ def main():
     unblock = subs.add_parser("unblock")
     unblock.add_argument("mac")
     unblock.set_defaults(func=cmd_unblock)
+    replay = subs.add_parser("replay")
+    replay.add_argument("directory", help="directory of 300 s chunks from tools/pcap_split.py")
+    replay.add_argument("--limit", type=int, default=None, help="stop after N chunks")
+    replay.set_defaults(func=cmd_replay)
     export = subs.add_parser("export")
     export.add_argument("table", choices=TABLES)
     export.add_argument("--out", required=True)
     export.set_defaults(func=cmd_export)
     args = parser.parse_args()
     conf = config.load(args.config)
+    if args.db:
+        conf["paths"]["db"] = args.db
+    if args.label:
+        conf["run_label"] = args.label
     conn = db.connect(conf["paths"]["db"])
     args.func(conn, conf, args)
 
