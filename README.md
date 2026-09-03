@@ -53,7 +53,29 @@ curve rather than a single pass or fail.
 This is what makes detection latency and false positive rates measurable rather than
 estimated.
 
+## Results
+
+Four devices, two instrumented ESP32 nodes and two commercial Tapo devices, monitored
+from 2026-08-16 to 2026-09-03. Baselines were frozen on 2026-08-22, so the figures below
+are out of sample: 14,861 scored windows against 46 labelled injections.
+
+| Anomaly type | Detected |
+| --- | --- |
+| Cadence | 6 / 6 |
+| Destination | 9 / 9 |
+| Protocol | 3 / 3 |
+| Volume | 16 / 28 |
+
+Volume detection is magnitude dependent, which is why it is reported as a curve rather
+than a single figure: 10 of 10 at 3x and 2 of 2 at 5x, against 4 of 16 at 1.5x and 2x.
+The boundary sits between 2x and 3x. The other three types were caught in every trial.
+
+240 of 14,624 clean windows reached the alert threshold, a per-window false positive rate
+of 1.64 percent. That is measured against each device's own frozen baseline, excluding
+windows that overlap a labelled injection, and before the two-window agreement rule that
+gates enforcement.
+
 ## Status
 
-Core engine complete and running. Node firmware written across all three profiles.
-Evaluation against live nodes not yet run.
+Core engine complete and running on the Pi. Node firmware written across all three
+profiles, plug and sensor deployed.
