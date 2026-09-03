@@ -19,7 +19,7 @@ def add(name, element):
 
 
 def remove(name, element):
-    # deleting an absent element is an error in nftables, and it is not interesting here
+    # nftables errors on deleting an absent element, not interesting here
     nft(["delete", "element", "inet", "sentri", name, "{ " + element + " }"], check=False)
 
 
@@ -29,7 +29,7 @@ def load_ruleset(path):
 
 def apply_tier(mac, ip, tier, conf):
     if conf["enforcement"]["mode"] != "enforce" or mac in conf["enforcement"]["never_enforce"]:
-        return False
+        return False  # observe still scores and logs, it just does not touch nft
     if tier == "block":
         add("blocked_mac", mac)
         if ip:
@@ -59,6 +59,7 @@ def sync_from_db(conn, conf):
             apply_tier(dev["mac"], dev["ip"], dev["tier"], conf)
 
 
+# no json output worth parsing on this nft build, so scrape the set body
 def list_active():
     active = {}
     for name in SETS:

@@ -8,6 +8,5 @@ research/
 *.db-shm
 .venv/
 __pycache__/
-CLAUDE*.md
 .DS_Store
 node-firmware/.pio/

@@ -6,19 +6,22 @@ from scapy.layers.l2 import ARP, Ether
 from scapy.utils import PcapReader
 
 WINDOW_SECONDS = 300
-EMIT_LAG = 5
-COMPLETE_MIN = 285
+EMIT_LAG = 5  # let the window edge pass before emitting, chunks land a little late
+COMPLETE_MIN = 285  # below this the window is truncated, do not fit or score it
 MIN_DURATION = 1.0
-SMALL_BYTES = 150
-LARGE_BYTES = 700
+SMALL_BYTES = 150  # keepalive sized
+LARGE_BYTES = 700  # actual payload, eyeballed off the idle captures
 DNS_TTL = 86400
 
 FEATURES = (
+    # volume. bytes_out_rate sits around 0.99 with pkts_out_rate, both kept anyway
     "pkts_out_rate", "pkts_in_rate", "bytes_out_rate", "bytes_in_rate",
+    # shape and timing
     "mean_pkt_size_out", "std_pkt_size_out", "mean_iat_out", "std_iat_out",
     "frac_small_out", "frac_large_out", "distinct_peers", "tcp_syn_rate",
 )
 
+# heavy tailed, log1p before the fit or one busy window owns the covariance
 LOG_FEATURES = frozenset((
     "pkts_out_rate", "pkts_in_rate", "bytes_out_rate", "bytes_in_rate",
     "mean_iat_out", "std_iat_out", "distinct_peers", "tcp_syn_rate",
@@ -29,6 +32,7 @@ INFRA_PORTS = {53: "dns_count", 67: "dhcp_count", 68: "dhcp_count", 123: "ntp_co
 # dnsmasq answers an address under three verbs, and roughly half of them are cache hits
 ANSWER_VERBS = frozenset(("reply", "cached", "cached-stale"))
 
+# not a real public suffix list, just the ones that actually turn up here
 MULTI_SUFFIXES = frozenset((
     "co.uk", "org.uk", "ac.uk", "gov.uk", "com.au", "net.au", "co.nz",
     "co.jp", "com.br", "co.za", "com.tr", "com.cn",
@@ -54,8 +58,7 @@ class DnsLog:
         self.now = 0
         self.seeded = False
 
-    # the log rotates daily, so a restart would otherwise lose every mapping for a device
-    # that last resolved before the rotation
+    # log rotates daily, without this a restart loses everything resolved before the rotation
     def seed(self, now):
         previous = self.path + ".1"
         if not os.path.exists(previous):
@@ -79,10 +82,11 @@ class DnsLog:
             for line in f:
                 self.feed(line, now)
             self.offset = f.tell()
+        # drop mappings nothing has touched in a day
         self.names = {k: v for k, v in self.names.items() if v[1] > now - DNS_TTL}
         self.pending = {k: v for k, v in self.pending.items() if v[1] > now - DNS_TTL}
 
-    # lines are read incrementally so the read time is close enough for a 24 h expiry
+    # read incrementally, so the read time is close enough for a 24 h expiry
     def feed(self, line, now):
         parts = line.split()
         if len(parts) < 8:
@@ -94,7 +98,7 @@ class DnsLog:
             asked = self.pending.get(parts[5])
             if asked:
                 self.chain = (asked[0], parts[5])
-            # each cname hop gets its own reply line, so the address line carries the alias
+            # one reply line per cname hop, the address line carries the alias
             if self.chain and parts[7][0].isdigit():
                 self.names[(self.chain[0], parts[7])] = (self.chain[1], now)
 
@@ -102,9 +106,8 @@ class DnsLog:
         hit = self.names.get((client_ip, peer_ip))
         if not hit:
             return None
-        # the expiry is meant to forget endpoints a device stopped using, so contact keeps a
-        # mapping alive. without this a long lived connection outlives its own dns answer and
-        # the destination silently re-keys from the domain to a /24 prefix
+        # contact keeps the mapping alive. otherwise a long lived connection outlives its own
+        # dns answer and the destination silently re-keys from the domain to a /24 prefix
         if self.now > hit[1]:
             self.names[(client_ip, peer_ip)] = (hit[0], self.now)
         return hit[0]
@@ -114,7 +117,11 @@ def dest_key(device_ip, peer_ip, dnslog):
     name = dnslog.lookup(device_ip, peer_ip) if dnslog else None
     if name:
         return "d:" + registrable(name)
-    return "p:" + peer_ip.rsplit(".", 1)[0] + ".0/24"
+    return "p:" + peer_ip.rsplit(".", 1)[0] + ".0/24"  # no name, fall back to the /24
+
+
+# def dest_key(device_ip, peer_ip, dnslog):
+#     return dnslog.lookup(device_ip, peer_ip) or peer_ip  # bare ip, before the domain keying
 
 
 def parse_chunk(path, conf):
@@ -140,7 +147,7 @@ def parse_chunk(path, conf):
             if IP not in pkt:
                 continue
             ip = pkt[IP]
-            # the peer is identified by IP, the far side MAC is always the Pi for routed traffic
+            # peer is the IP, the far side MAC is always the Pi on routed traffic
             peer_ip = ip.dst if direction == 0 else ip.src
             device_ips[mac] = ip.src if direction == 0 else ip.dst
             proto, peer_port, is_syn = "other", 0, 0
@@ -159,7 +166,7 @@ def parse_chunk(path, conf):
             elif ICMP in pkt:
                 proto = "icmp"
                 if peer_ip == gateway:
-                    continue
+                    continue  # gateway pings, every device does them
             # wirelen, not len(pkt): the 96 byte snaplen truncates every capture
             packets.append((float(pkt.time), mac, direction, int(pkt.wirelen),
                             peer_ip, proto, peer_port, is_syn))
@@ -175,7 +182,7 @@ def window_features(pkts, duration, device_ip, dnslog, gateway):
             counters[name] += 1
         else:
             external.append(p)
-    out = [p for p in external if p[2] == 0]
+    out = [p for p in external if p[2] == 0]  # direction 0 is device to peer
     inbound = [p for p in external if p[2] == 1]
     dests = {}
     services = set()
@@ -184,6 +191,7 @@ def window_features(pkts, duration, device_ip, dnslog, gateway):
         if p[2] == 0:
             services.add(p[5] + "/" + str(p[6]))
     sizes = np.array([p[3] for p in out], dtype=float)
+    # outbound only, inbound timing is the peer's pacing not the device's
     gaps = np.diff(sorted(p[0] for p in out)) if len(out) > 1 else np.array([])
     feats = {
         "pkts_out_rate": len(out) / duration,
@@ -192,7 +200,7 @@ def window_features(pkts, duration, device_ip, dnslog, gateway):
         "bytes_in_rate": sum(p[3] for p in inbound) / duration,
         "mean_pkt_size_out": float(sizes.mean()) if len(sizes) else 0.0,
         "std_pkt_size_out": float(sizes.std()) if len(sizes) else 0.0,
-        "mean_iat_out": float(gaps.mean()) if len(gaps) else float(duration),
+        "mean_iat_out": float(gaps.mean()) if len(gaps) else float(duration),  # silent, so one gap
         "std_iat_out": float(gaps.std()) if len(gaps) else 0.0,
         "frac_small_out": float((sizes < SMALL_BYTES).mean()) if len(sizes) else 0.0,
         "frac_large_out": float((sizes > LARGE_BYTES).mean()) if len(sizes) else 0.0,
@@ -204,6 +212,7 @@ def window_features(pkts, duration, device_ip, dnslog, gateway):
     return feats, counters
 
 
+# order follows names, a baseline carries its own list
 def to_vector(feats, names=FEATURES):
     return np.array([np.log1p(feats[f]) if f in LOG_FEATURES else feats[f] for f in names])
 
@@ -216,6 +225,7 @@ class Windower:
         self.stream_ts = 0.0
 
     def start_segment(self, ts):
+        # one window back, so the first ready() does not emit the partial window we joined
         base = int(ts) // WINDOW_SECONDS * WINDOW_SECONDS - WINDOW_SECONDS
         self.obs_start = ts
         self.stream_ts = ts
@@ -230,7 +240,7 @@ class Windower:
             self.buf.setdefault((p[1], start), []).append(p)
         if packets:
             self.stream_ts = max(self.stream_ts, packets[-1][0])
-            # a chunk can hold packets slightly older than its rotation timestamp
+            # a chunk can hold packets a bit older than its rotation stamp
             self.obs_start = min(self.obs_start, packets[0][0])
 
     def advance(self, ts):
@@ -242,7 +252,7 @@ class Windower:
         for mac in sorted(self.last):
             start = self.last[mac] + WINDOW_SECONDS
             while start + WINDOW_SECONDS <= cutoff:
-                observed = max(start, self.obs_start)
+                observed = max(start, self.obs_start)  # we may have joined mid window
                 duration = max(MIN_DURATION, (start + WINDOW_SECONDS) - observed)
                 out.append((mac, start, duration, self.buf.pop((mac, start), [])))
                 self.last[mac] = start

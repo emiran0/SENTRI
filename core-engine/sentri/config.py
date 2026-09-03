@@ -8,7 +8,7 @@ DEFAULTS = {
         "pihole_log": "/var/log/pihole/pihole.log",
         "nft_file": "nftables/sentri.nft",
     },
-    "capture": {"grace_seconds": 60, "poll_seconds": 30},
+    "capture": {"grace_seconds": 60, "poll_seconds": 30},  # grace covers the tcpdump rotation
     "network": {"gateway_ip": "192.168.50.1", "iface": "eth1"},
     "exclude": {"macs": [], "tcp_ports": [8080, 22]},
     "learning": {
@@ -23,12 +23,12 @@ DEFAULTS = {
         "alert_margin": 2.0,
         "critical_multiplier": 4.0,
         "deescalate_windows": 3,
-        # escalate when `escalate_hits` of the last `escalate_window` windows were
-        # anomalous. 2 of 2 is the consecutive-window rule, so the default preserves the
-        # old behaviour and a wider span has to be asked for
+        # escalate on escalate_hits of the last escalate_window windows. 2 of 2 is the old
+        # consecutive rule, so a wider span has to be asked for
         "escalate_window": 2,
         "escalate_hits": 2,
     },
+    # six of the twelve, the rest were collinear with these or flat on these devices
     "model_features": ["bytes_out_rate", "bytes_in_rate", "mean_pkt_size_out",
                        "mean_iat_out", "std_iat_out", "distinct_peers"],
     "variance_floors": {},
@@ -46,6 +46,7 @@ def load(path="config.yaml"):
     return conf
 
 
+# recursive, a config naming one key under thresholds must not drop the rest of them
 def merge(base, over):
     out = dict(base)
     for key, value in over.items():

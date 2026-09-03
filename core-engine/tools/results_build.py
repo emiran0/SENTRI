@@ -677,6 +677,121 @@ def r1_detection(c, args):
     return per_trial, cells, per_cell
 
 
+def r1_normal_anchor(c, args):
+    """the uninjected anchor for F1: how often the detector flags a window when nothing is
+    injected, on the same devices over the same run as the ladder.
+
+    This is a per-window rate. The ladder points beside it are per-trial detection rates,
+    so the two are different quantities sharing an axis, and the figure marks the anchor
+    differently and says so. It is here because a detection curve that begins at the
+    weakest injected magnitude gives the reader no zero point."""
+    log("R1 uninjected anchor")
+    rows = []
+    for mac in sorted(INSTRUMENTED, key=lambda m: NAME[m]):
+        bm = baseline_model(active_baseline(c, mac))
+        spans = injection_spans(c, mac)
+        enf = applied_enforcement_spans(c, mac)
+        t_alert = bm["thresholds"]["t_alert"]
+        clean = [r for r in scored_windows(c, mac, bm, label="inject-3rep")
+                 if not any(overlaps(sp["start"], sp["end"], r["window_start"])
+                            for sp in spans)
+                 and not any(overlaps(a, b_, r["window_start"]) for a, b_ in enf)]
+        far = sum(1 for r in clean if trusted(r) and r["d2"] >= t_alert)
+        nov = sum(1 for r in clean if json.loads(r["new_dests_json"] or "[]"))
+        flagged = sum(1 for r in clean
+                      if (trusted(r) and r["d2"] >= t_alert)
+                      or json.loads(r["new_dests_json"] or "[]"))
+        lo, hi = wilson(flagged, len(clean))
+        rows.append([NAME[mac], len(clean), far, nov, flagged,
+                     round(flagged / len(clean), 5), round(lo, 5), round(hi, 5),
+                     round(t_alert, 3)])
+    write_csv("R1-normal-anchor.csv",
+              ["device", "normal_windows", "windows_over_t_alert", "novelty_windows",
+               "flagged_windows", "flag_rate", "wilson_lo", "wilson_hi", "t_alert"], rows,
+              "trusted uninjected windows under the active baseline in run_label "
+              "inject-3rep, applied enforcement excluded",
+              "a per-window flag rate, not a per-trial detection rate. it anchors the "
+              "magnitude axis of F1 at normal traffic and is drawn with its own marker.")
+    for r in rows:
+        note("R1", "%s flags %d of %d uninjected windows over the injection run, %.2f "
+                   "percent, which is where the F1 ladder starts"
+             % (r[0], r[4], r[1], 100 * r[5]))
+    return rows
+
+
+# the feature each injected type actually drives, from the firmware semantics. volume
+# scales PRIMARY_OUT so it moves the byte rate and the mean packet size; cadence divides
+# the task interval so it moves the inter-arrival features; protocol costs a persistent
+# socket so it moves the SYN rate; destination adds a peer
+EXPECTED_FEATURES = {
+    "volume": ("bytes_out_rate", "mean_pkt_size_out"),
+    "cadence": ("std_iat_out", "mean_iat_out"),
+    "destination": ("distinct_peers",),
+    "protocol": ("tcp_syn_rate",),
+}
+
+
+def r1_attribution(c, args):
+    """for every detected trial, does the feature that carried the distance match the one
+    the injected type actually drives?
+
+    A trial is counted as detected under the pre-registered rule: any intersecting window
+    above normal. That rule cannot tell an injection apart from an unrelated event that
+    happened to land inside the same window. This does not reclassify anything, because
+    changing the rule after seeing the results would be exactly the free parameter the
+    protocol forbids. It records where the two disagree so the report can say so."""
+    log("R1 detection attribution check")
+    rows = []
+    for mac in sorted(INSTRUMENTED, key=lambda m: NAME[m]):
+        bm = baseline_model(active_baseline(c, mac))
+        t_alert = bm["thresholds"]["t_alert"]
+        for sp in injection_spans(c, mac):
+            inside = [r for r in scored_windows(c, mac, bm)
+                      if overlaps(sp["start"], sp["end"], r["window_start"])
+                      and trusted(r)]
+            if not inside:
+                continue
+            peak = max(inside, key=lambda r: r["d2"])
+            hits = any(json.loads(r["new_dests_json"] or "[]") for r in inside)
+            detected = peak["d2"] >= t_alert or hits
+            if not detected:
+                continue
+            contrib = json.loads(peak["contributions_json"])
+            z = json.loads(peak["zscores_json"] or "{}")
+            top = contrib[0]["feature"] if contrib else ""
+            expect = EXPECTED_FEATURES.get(sp["type"], ())
+            # a trial detected by the discrete rule needs no distance signature at all,
+            # so a novelty hit makes it consistent whatever the distance was doing. that
+            # covers the destination beacon and the protocol swap, both of which register
+            # a new key rather than moving the covariance
+            match = bool(top in expect or hits)
+            rows.append([
+                NAME[mac], span_campaign(c, sp)[0], sp["type"], magnitude_label(sp),
+                time.strftime("%Y-%m-%d %H:%M", time.gmtime(sp["start"])),
+                round(peak["d2"], 2), top,
+                round(100 * contrib[0]["share"], 0) if contrib else "",
+                "|".join(expect), int(match), int(hits),
+                "; ".join("%s %+.2f" % (k, v) for k, v in
+                          sorted(z.items(), key=lambda kv: -abs(kv[1]))[:3]),
+                "" if match else "top feature is not one the injected type drives",
+            ])
+    write_csv("R1-attribution-check.csv",
+              ["device", "campaign", "type", "magnitude", "injection_start_utc", "peak_d2",
+               "top_feature", "top_share_percent", "expected_features", "consistent",
+               "novelty_hit", "top_zscores", "note"], rows,
+              "the peak in-injection window of every detected trial, with its top "
+              "contributing feature against the feature the injected type drives",
+              "a diagnostic, not a reclassification. every detection rate elsewhere in "
+              "this file uses the pre-registered rule unchanged.")
+    bad = [r for r in rows if not r[9]]
+    note("R1", "detection attribution: %d of %d detected trials were carried by a feature "
+               "the injected type does not drive" % (len(bad), len(rows)))
+    for r in bad:
+        note("R1", "  %s %s %s at %s: top feature %s (%s), expected %s"
+             % (r[0], r[2], r[3], r[4], r[6], r[11], r[8]))
+    return rows
+
+
 def r1_extras(c, per_cell, args):
     """the floor, the separation, the profile contrast, the misses and the prefix path"""
     log("R1 supporting analyses")
@@ -2717,6 +2832,7 @@ def f8_timeline(c, args):
 # title (the caption does that), and every panel has a CSV beside it.
 CM = 1 / 2.54
 COL1, COL2 = 8.6 * CM, 17.5 * CM
+NORMAL_X = 0.55        # where the uninjected anchor sits on the magnitude axis
 # fixed order, never cycled, chosen for lightness separation so greyscale survives
 SERIES = [
     {"c": "#000000", "ls": "-", "m": "o"},
@@ -2736,7 +2852,7 @@ def style():
         "axes.titlesize": 7, "legend.fontsize": 6, "xtick.labelsize": 6,
         "ytick.labelsize": 6, "axes.linewidth": 0.6, "lines.linewidth": 1.2,
         "lines.markersize": 3.5, "axes.spines.top": False, "axes.spines.right": False,
-        "legend.frameon": False, "figure.dpi": 300, "savefig.dpi": 300,
+        "legend.frameon": False, "figure.dpi": 300, "savefig.dpi": 600,
         "savefig.bbox": "tight", "savefig.pad_inches": 0.02, "ps.fonttype": 42,
     })
     return plt
@@ -2766,83 +2882,190 @@ def _blend(ax):
     return mtransforms.blended_transform_factory(ax.transData, ax.transAxes)
 
 
-def fig_f1(plt):
-    """detection rate against magnitude, Wilson intervals, the non-separable floor kept in.
-
-    Campaigns B and C share the volume ladder: B ran 1.5x, 2x and 3x at three repetitions
-    with the start offset varied, C added the 5x rung at one repetition. They are drawn on
-    one curve because they are the same ladder on the same devices under the same
-    escalation rule, and the repetition count is marked at every point. A cell at one
-    repetition supports no interval, so it is drawn as a hollow marker with no error bar
-    and is visually distinct from the cells that carry one."""
-    rows = [r for r in read("R1-cells.csv")
-            if r["campaign"].startswith("B") or r["campaign"].startswith("C")]
-    devices = sorted(set(r["device"] for r in rows))
-    fig, axes = plt.subplots(1, 2, figsize=(COL2, 5.4 * CM), sharey=True)
-    ladder = {"1.5x": 1.5, "2x": 2.0, "3x": 3.0, "5x": 5.0}
-    for ax, dev, letter in zip(axes, devices, "ab"):
-        sub = [r for r in rows if r["device"] == dev]
-        # one point per magnitude; where a level appears in both campaigns keep the one
-        # with more repetitions, so the curve never double-counts a rung
-        best = {}
-        for r in sub:
-            if r["type"] != "volume" or r["magnitude"] not in ladder:
-                continue
-            m = ladder[r["magnitude"]]
-            if m not in best or int(r["n_trials"]) > int(best[m]["n_trials"]):
-                best[m] = r
-        xs = sorted(best)
-        ys = [num(best[m]["detections"]) / num(best[m]["n_trials"]) for m in xs]
-        st = SERIES[0]
-        ax.plot(xs, ys, color=st["c"], linestyle=st["ls"], linewidth=1.2, zorder=2,
-                label="volume ladder")
-        for m, y in zip(xs, ys):
-            r = best[m]
-            k, n = int(float(r["detections"])), int(float(r["n_trials"]))
-            if n > 1:
-                a, b = wilson(k, n)
-                ax.errorbar([m], [y], yerr=[[y - a], [b - y]], color=st["c"],
-                            marker=st["m"], capsize=2, elinewidth=0.7, linestyle="none",
-                            zorder=3)
-            else:
-                # no interval exists at one repetition, so none is drawn and the marker
-                # itself says so
-                ax.plot([m], [y], color=st["c"], marker=st["m"], linestyle="none",
-                        markerfacecolor="#ffffff", markeredgewidth=1.1, markersize=5,
+def _f1_panel(ax, dev, rows, ladder, dx=6.2):
+    """draw one device's ladder. shared by the side-by-side and stacked layouts so the two
+    files cannot drift apart"""
+    sub = [r for r in rows if r["device"] == dev]
+    # one point per magnitude; where a level appears in both campaigns keep the one with
+    # more repetitions, so the curve never double-counts a rung
+    best = {}
+    for r in sub:
+        if r["type"] != "volume" or r["magnitude"] not in ladder:
+            continue
+        m = ladder[r["magnitude"]]
+        if m not in best or int(r["n_trials"]) > int(best[m]["n_trials"]):
+            best[m] = r
+    xs = sorted(best)
+    ys = [num(best[m]["detections"]) / num(best[m]["n_trials"]) for m in xs]
+    st = SERIES[0]
+    # anchor the ladder at normal traffic. this is the fraction of uninjected windows the
+    # detector flags on the same device over the same run, so it is a per-window rate
+    # where the ladder points are per-trial detection rates, and it gets its own marker
+    anchor = [r for r in read("R1-normal-anchor.csv") if r["device"] == dev]
+    if anchor:
+        a_ = anchor[0]
+        ax.plot([NORMAL_X], [num(a_["flag_rate"])], color="#666666", marker="D",
+                markersize=4, linestyle="none", zorder=3,
+                label="normal traffic, per-window flag rate")
+        ax.plot([NORMAL_X] + xs, [num(a_["flag_rate"])] + ys, color=st["c"],
+                linestyle=st["ls"], linewidth=1.2, zorder=2)
+    else:
+        ax.plot(xs, ys, color=st["c"], linestyle=st["ls"], linewidth=1.2, zorder=2)
+    ax.plot([], [], color=st["c"], linestyle=st["ls"], marker=st["m"],
+            label="volume ladder")
+    for m, y in zip(xs, ys):
+        r = best[m]
+        k, n = int(float(r["detections"])), int(float(r["n_trials"]))
+        if n > 1:
+            lo, hi = wilson(k, n)
+            ax.errorbar([m], [y], yerr=[[y - lo], [hi - y]], color=st["c"],
+                        marker=st["m"], capsize=2, elinewidth=0.7, linestyle="none",
                         zorder=3)
-            ax.annotate("n=%d" % n, (m, y), textcoords="offset points", xytext=(0, -9),
-                        ha="center", fontsize=5, color="#555555")
-        # destination is categorical at a single level, so it is a marked point and not a
-        # curve, placed off the ladder axis
-        dx = 6.2
-        for typ, mark in (("destination", SERIES[1]),):
-            for r in [r for r in sub if r["type"] == typ]:
-                k, n = int(float(r["detections"])), int(float(r["n_trials"]))
-                p_ = k / n
-                a, b = wilson(k, n)
-                ax.errorbar([dx], [p_], yerr=[[p_ - a], [b - p_]], color=mark["c"],
-                            marker=mark["m"], linestyle="none", capsize=2, elinewidth=0.7,
-                            label="destination, 0.5 contacts/window")
-                ax.annotate("n=%d" % n, (dx, p_), textcoords="offset points",
-                            xytext=(0, -9), ha="center", fontsize=5, color="#555555")
-        ax.set_xticks(sorted(set(list(ladder.values()) + [dx])))
-        ax.set_xticklabels(["1.5x", "2x", "3x", "5x", "dest"], fontsize=6)
-        ax.set_xlim(1.1, 6.8)
-        ax.set_xlabel("(%s) %s, injected magnitude" % (letter, dev))
-        ax.set_ylim(-0.12, 1.08)
-        ax.grid(axis="y", **GRID)
-        ax.set_axisbelow(True)
-    axes[0].set_ylabel("detection rate")
-    h, l = axes[0].get_legend_handles_labels()
+        else:
+            # no interval exists at one repetition, so none is drawn and the marker says so
+            ax.plot([m], [y], color=st["c"], marker=st["m"], linestyle="none",
+                    markerfacecolor="#ffffff", markeredgewidth=1.1, markersize=5, zorder=3)
+    # destination is categorical at a single level, so it is a marked point and not a
+    # curve, placed off the ladder axis
+    for typ, mark in (("destination", SERIES[1]),):
+        for r in [r for r in sub if r["type"] == typ]:
+            k, n = int(float(r["detections"])), int(float(r["n_trials"]))
+            p_ = k / n
+            lo, hi = wilson(k, n)
+            ax.errorbar([dx], [p_], yerr=[[p_ - lo], [hi - p_]], color=mark["c"],
+                        marker=mark["m"], linestyle="none", capsize=2, elinewidth=0.7,
+                        label="destination, 0.5 contacts/window")
+    ax.set_xticks([NORMAL_X] + sorted(set(list(ladder.values()) + [dx])))
+    ax.set_xticklabels(["normal", "1.5x", "2x", "3x", "5x", "dest"], fontsize=6)
+    ax.set_xlim(0.25, 6.8)
+    ax.set_ylim(-0.05, 1.05)
+    ax.set_yticks([0.0, 0.2, 0.4, 0.6, 0.8, 1.0])
+    ax.grid(axis="y", **GRID)
+    ax.set_axisbelow(True)
+
+
+def _f1_legend(ax):
+    h, l = ax.get_legend_handles_labels()
     seen, hh, ll = set(), [], []
     for a, b in zip(h, l):
         if b not in seen:
             seen.add(b)
             hh.append(a)
             ll.append(b)
-    axes[0].legend(hh, ll, loc="lower right")
+    ax.legend(hh, ll, loc="lower right", fontsize=5.5)
+
+
+def fig_f1(plt):
+    """detection rate against magnitude, side by side, two columns wide.
+
+    Campaigns B and C share the volume ladder: B ran 1.5x, 2x and 3x at three repetitions
+    with the start offset varied, C added the 5x rung at one repetition. They are drawn on
+    one curve because they are the same ladder on the same devices under the same
+    escalation rule, and every point is labelled with the fraction behind it."""
+    rows = [r for r in read("R1-cells.csv")
+            if r["campaign"].startswith("B") or r["campaign"].startswith("C")]
+    devices = sorted(set(r["device"] for r in rows))
+    ladder = {"1.5x": 1.5, "2x": 2.0, "3x": 3.0, "5x": 5.0}
+    fig, axes = plt.subplots(1, 2, figsize=(COL2, 5.4 * CM), sharey=True)
+    for ax, dev, letter in zip(axes, devices, "ab"):
+        _f1_panel(ax, dev, rows, ladder)
+        ax.set_xlabel("(%s)" % letter)
+    axes[0].set_ylabel("detection rate")
+    _f1_legend(axes[0])
     fig.tight_layout()
     save(fig, "F1-detection-vs-magnitude")
+
+
+def fig_f1_stacked(plt):
+    """the same figure stacked, one panel above the other, at single column width.
+
+    Same data and same panel code as F1; only the layout differs, so the two files cannot
+    disagree. A single column is 8.6 cm, which the side-by-side version cannot fit."""
+    rows = [r for r in read("R1-cells.csv")
+            if r["campaign"].startswith("B") or r["campaign"].startswith("C")]
+    devices = sorted(set(r["device"] for r in rows))
+    ladder = {"1.5x": 1.5, "2x": 2.0, "3x": 3.0, "5x": 5.0}
+    fig, axes = plt.subplots(2, 1, figsize=(COL1, 9.4 * CM), sharex=True)
+    for ax, dev, letter in zip(axes, devices, "ab"):
+        _f1_panel(ax, dev, rows, ladder)
+        ax.set_ylabel("detection rate")
+        ax.set_xlabel("(%s)" % letter)
+    _f1_legend(axes[0])
+    fig.tight_layout()
+    save(fig, "F1v-detection-vs-magnitude-stacked")
+
+
+def r1_cells_attributed(c, args):
+    """the same cells scored under the attribution-consistent rule.
+
+    A trial counts as a detection only if it was detected under the pre-registered rule
+    AND the feature carrying the peak window's distance is one the injected type actually
+    drives, or the discrete novelty rule fired. The rule is applied uniformly to every
+    trial, not to the one that looks wrong, because a criterion applied to a single cell
+    after seeing its value is not a criterion. It is an alternative reading, reported
+    beside the pre-registered one and never in place of it."""
+    log("R1 cells under the attribution-consistent rule")
+    att = list(csv.DictReader(open(os.path.join(OUT_CSV, "R1-attribution-check.csv"))))
+    # key on the campaign as well: the attribution check covers every campaign, while a
+    # cell here is one campaign's repetitions, and pooling them counts trials from a run
+    # that is not in this table
+    ok = defaultdict(int)
+    for r in att:
+        if r["consistent"] == "1":
+            ok[(r["campaign"], r["device"], r["type"], r["magnitude"])] += 1
+    rows = []
+    for r in csv.DictReader(open(os.path.join(OUT_CSV, "R1-cells.csv"))):
+        if not r["campaign"].startswith(("B", "C")):
+            continue
+        key = (r["campaign"][0], r["device"], r["type"], r["magnitude"])
+        k_pre = int(float(r["detections"]))
+        n = int(float(r["n_trials"]))
+        k_att = ok.get(key, 0)
+        lo, hi = wilson(k_att, n)
+        rows.append([r["campaign"][0], r["device"], r["type"], r["magnitude"], n,
+                     k_pre, k_att, "%d/%d" % (k_att, n),
+                     "n=1; no interval" if n == 1 else fmt_ci(lo, hi),
+                     int(k_att != k_pre)])
+    write_csv("R1-cells-attributed.csv",
+              ["campaign", "device", "type", "magnitude", "n_trials",
+               "detections_preregistered", "detections_attributed",
+               "detection_rate_attributed", "wilson_95ci_attributed", "differs"], rows,
+              "R1-cells.csv rescored against R1-attribution-check.csv",
+              "an alternative criterion, not a correction. every headline rate in this "
+              "file uses the pre-registered rule.")
+    diff = [r for r in rows if r[9]]
+    note("R1", "under the attribution-consistent rule %d of %d cells change: %s"
+         % (len(diff), len(rows),
+            "; ".join("%s %s %s from %d/%d to %d/%d"
+                      % (r[1], r[2], r[3], r[5], r[4], r[6], r[4]) for r in diff)
+            or "none"))
+    return rows
+
+
+def fig_f1_attributed(plt):
+    """the stacked ladder under the attribution-consistent rule.
+
+    Identical to F1v in data, layout and styling except that a trial counts only when the
+    feature carrying its distance matches the injected type. On the current data this
+    moves exactly one cell, sensor-01 volume at 1.5x, from 1/3 to 0/3, because that
+    trial's peak window was led by std_iat_out at -3.34, a timing signature, rather than
+    by the byte rate the injection drives."""
+    rows = []
+    for r in read("R1-cells-attributed.csv"):
+        rows.append({"device": r["device"], "type": r["type"],
+                     "magnitude": r["magnitude"], "n_trials": r["n_trials"],
+                     "detections": r["detections_attributed"],
+                     "campaign": r["campaign"]})
+    devices = sorted(set(r["device"] for r in rows))
+    ladder = {"1.5x": 1.5, "2x": 2.0, "3x": 3.0, "5x": 5.0}
+    fig, axes = plt.subplots(2, 1, figsize=(COL1, 9.4 * CM), sharex=True)
+    for ax, dev, letter in zip(axes, devices, "ab"):
+        _f1_panel(ax, dev, rows, ladder)
+        ax.set_ylabel("detection rate,\nattribution-consistent")
+        ax.set_xlabel("(%s)" % letter)
+    _f1_legend(axes[0])
+    fig.tight_layout()
+    save(fig, "F1a-detection-vs-magnitude-attributed")
 
 
 def fig_f2(plt):
@@ -2929,76 +3152,99 @@ def fig_f3(plt):
     save(fig, "F3-distance-separation")
 
 
-def fig_f4(plt):
-    """the four arms as a decomposition, never as one transfer score. the A-to-B step and
-    the B-to-C step are annotated so the reader does not have to subtract bars"""
+def _f4_values():
+    """the four arms on the shared metrics. one definition in every arm: a window is
+    flagged when its trusted distance clears t_alert or it carries a novelty hit, and
+    attacked or injected windows are excluded everywhere. mixing episodes into one arm and
+    flagged windows into another would compare two quantities that differ by an order of
+    magnitude by construction"""
     ab = read("R5-arms-AB-live.csv")
     bench = read("R5-benchmark-false-positives.csv")
-    fig, axes = plt.subplots(1, 3, figsize=(COL2, 6.2 * CM))
     arms = ["A", "B", "C", "D"]
 
-    def arm_value(arm, fn_live, fn_bench):
+    def arm_value(arm, col):
         if arm in ("A", "B"):
-            v = [fn_live(r) for r in ab if r["arm"] == arm]
+            v = [num(r[col]) for r in ab if r["arm"] == arm]
         else:
-            v = [fn_bench(r) for r in bench
+            v = [num(r[col]) for r in bench
                  if r["arm"] == arm and "incidental" not in r["device"]]
         v = [x for x in v if x == x]
         return float(np.mean(v)) if v else float("nan")
 
-    # both panels use the same definition in every arm: a window is flagged when its
-    # trusted distance clears t_alert or it carries a novelty hit, and attacked or
-    # injected windows are excluded everywhere. mixing episodes into one arm and flagged
-    # windows into another would compare two quantities that differ by an order of
-    # magnitude by construction, which is the trap the summary warns about
-    vals_a = [arm_value(a, lambda r: num(r["percent_flagged"]),
-                        lambda r: num(r["percent_flagged"])) for a in arms]
-    vals_b = [arm_value(a, lambda r: num(r["flagged_per_device_day"]),
-                        lambda r: num(r["flagged_per_device_day"])) for a in arms]
-    # panel c: destination key composition
-    dom = [arm_value(a, lambda r: num(r["domain_keys"]), lambda r: num(r["domain_keys"]))
-           for a in arms]
-    pfx = [arm_value(a, lambda r: num(r["prefix_keys"]), lambda r: num(r["prefix_keys"]))
-           for a in arms]
+    return arms, {
+        "pct": [arm_value(a_, "percent_flagged") for a_ in arms],
+        "perday": [arm_value(a_, "flagged_per_device_day") for a_ in arms],
+        "dom": [arm_value(a_, "domain_keys") for a_ in arms],
+        "pfx": [arm_value(a_, "prefix_keys") for a_ in arms],
+    }
+
+
+def _f4_bar_panel(ax, arms, vals, ylab, letter):
     x = np.arange(len(arms))
-    for ax, vals, ylab, letter in (
-            (axes[0], vals_a, "false positive windows, percent", "a"),
-            (axes[1], vals_b, "false positive windows per device-day", "b")):
-        ax.bar(x, vals, width=0.6, color="#d4d4d4", edgecolor="#000000", linewidth=0.6)
-        for xi, v in zip(x, vals):
-            ax.annotate("%.1f" % v, (xi, v), textcoords="offset points", xytext=(0, 2),
-                        ha="center", fontsize=5.5)
-        ax.set_xticks(x)
-        ax.set_xticklabels(arms)
-        ax.set_ylabel(ylab)
-        ax.set_xlabel("(%s) arm" % letter)
-        ax.grid(axis="y", **GRID)
-        ax.set_axisbelow(True)
-        top = max(v for v in vals if v == v)
-        ax.set_ylim(0, top * 1.52)
-        # every step RQ4 decomposes, annotated rather than left to be subtracted.
-        # A to B is the resolver on live traffic, B to C is everything about a benchmark
-        # that is not the resolver, C to D is how much provenance an archive gives back
-        for i, (lab, col) in enumerate((("A to B", "#3b6ea5"), ("B to C", "#e08214"),
-                                        ("C to D", "#000000"))):
-            step = vals[i + 1] - vals[i]
-            ax.annotate("%s\n%+.1f" % (lab, step), (i + 0.5, top * 1.24),
-                        ha="center", fontsize=5.5, color=col)
-            ax.annotate("", xy=(i + 0.95, top * 1.14), xytext=(i + 0.05, top * 1.14),
-                        arrowprops=dict(arrowstyle="->", color=col, lw=0.6))
-    axes[2].bar(x - 0.17, dom, width=0.32, color="#4d4d4d", edgecolor="#000000",
-                linewidth=0.6, label="domain keys")
-    axes[2].bar(x + 0.17, pfx, width=0.32, color="#ffffff", edgecolor="#000000",
-                linewidth=0.6, hatch="////", label="prefix keys")
-    axes[2].set_xticks(x)
-    axes[2].set_xticklabels(arms)
-    axes[2].set_ylabel("destination keys, mean per device")
-    axes[2].set_xlabel("(c) arm")
-    axes[2].legend(loc="upper left")
-    axes[2].grid(axis="y", **GRID)
-    axes[2].set_axisbelow(True)
+    ax.bar(x, vals, width=0.6, color="#d4d4d4", edgecolor="#000000", linewidth=0.6)
+    for xi, v in zip(x, vals):
+        ax.annotate("%.1f" % v, (xi, v), textcoords="offset points", xytext=(0, 2),
+                    ha="center", fontsize=5.5)
+    ax.set_xticks(x)
+    ax.set_xticklabels(arms)
+    ax.set_ylabel(ylab)
+    ax.set_xlabel("(%s)" % letter)
+    ax.grid(axis="y", **GRID)
+    ax.set_axisbelow(True)
+    top = max(v for v in vals if v == v)
+    ax.set_ylim(0, top * 1.52)
+    # every step RQ4 decomposes, annotated rather than left to be subtracted. A to B is
+    # the resolver on live traffic, B to C is everything about a benchmark that is not the
+    # resolver, C to D is how much provenance an archive gives back
+    for i, (lab, col) in enumerate((("A to B", "#3b6ea5"), ("B to C", "#e08214"),
+                                    ("C to D", "#000000"))):
+        step = vals[i + 1] - vals[i]
+        ax.annotate("%s\n%+.1f" % (lab, step), (i + 0.5, top * 1.24), ha="center",
+                    fontsize=5.5, color=col)
+        ax.annotate("", xy=(i + 0.95, top * 1.14), xytext=(i + 0.05, top * 1.14),
+                    arrowprops=dict(arrowstyle="->", color=col, lw=0.6))
+
+
+def _f4_keys_panel(ax, arms, dom, pfx, letter):
+    x = np.arange(len(arms))
+    ax.bar(x - 0.17, dom, width=0.32, color="#4d4d4d", edgecolor="#000000",
+           linewidth=0.6, label="domain keys")
+    ax.bar(x + 0.17, pfx, width=0.32, color="#ffffff", edgecolor="#000000",
+           linewidth=0.6, hatch="////", label="prefix keys")
+    ax.set_xticks(x)
+    ax.set_xticklabels(arms)
+    ax.set_ylabel("destination keys,\nmean per device")
+    ax.set_xlabel("(%s)" % letter)
+    ax.legend(loc="upper left", fontsize=5.5)
+    ax.grid(axis="y", **GRID)
+    ax.set_axisbelow(True)
+
+
+def fig_f4(plt):
+    """the four arms as a decomposition, never as one transfer score, side by side"""
+    arms, v = _f4_values()
+    fig, axes = plt.subplots(1, 3, figsize=(COL2, 6.2 * CM))
+    _f4_bar_panel(axes[0], arms, v["pct"], "false positive windows, percent", "a")
+    _f4_bar_panel(axes[1], arms, v["perday"],
+                  "false positive windows per device-day", "b")
+    _f4_keys_panel(axes[2], arms, v["dom"], v["pfx"], "c")
     fig.tight_layout()
     save(fig, "F4-benchmark-decomposition")
+
+
+def fig_f4_stacked(plt):
+    """the same decomposition stacked, three panels at single column width.
+
+    Same data and the same panel code as F4; only the layout differs, so the two files
+    cannot disagree."""
+    arms, v = _f4_values()
+    fig, axes = plt.subplots(3, 1, figsize=(COL1, 12.0 * CM))
+    _f4_bar_panel(axes[0], arms, v["pct"], "false positive windows,\npercent", "a")
+    _f4_bar_panel(axes[1], arms, v["perday"],
+                  "false positive windows\nper device-day", "b")
+    _f4_keys_panel(axes[2], arms, v["dom"], v["pfx"], "c")
+    fig.tight_layout()
+    save(fig, "F4v-benchmark-decomposition-stacked")
 
 
 def fig_f5(plt):
@@ -3263,11 +3509,15 @@ def fig_f11(plt):
                              ha="right")
     axes[0].set_yscale("log")
     axes[0].axhline(CHI2_FLOOR, color="#000000", linestyle="--", linewidth=0.8)
-    axes[0].annotate("t_alert", (0.5, CHI2_FLOOR * 1.2), fontsize=5.5)
+    # get_yaxis_transform is x in axes coordinates, y in data coordinates, which is what
+    # a label pinned to a horizontal threshold line needs
+    axes[0].text(0.62, CHI2_FLOOR * 1.25, "t_alert",
+                 transform=axes[0].get_yaxis_transform(), fontsize=5.5, ha="right",
+                 va="bottom")
     axes[0].set_ylabel("(a) distance $D^2$")
     axes[1].set_ylabel("(b) packets\nper window")
     axes[1].set_xlabel("minutes from the start of the enforcement verification run")
-    axes[0].legend(loc="upper left", ncol=2)
+    axes[0].legend(loc="center right", ncol=1, fontsize=5.5)
     for ax in axes:
         ax.grid(**GRID)
         ax.set_axisbelow(True)
@@ -3301,7 +3551,8 @@ def fig_f12(plt):
             ax.annotate("%s rotations absorbed\n%s counterfactual blocks"
                         % (c["benign_ip_rotations_absorbed"],
                            c["counterfactual_raw_ip_blocks"]),
-                        (0.03, 0.62), xycoords="axes fraction", fontsize=5.5)
+                        (0.97, 0.06), xycoords="axes fraction", fontsize=5.5,
+                        ha="right")
         ax.set_xlabel("(%s) %s, days monitored" % (letter, dev))
         ax.grid(**GRID)
         ax.set_axisbelow(True)
@@ -3383,7 +3634,7 @@ def fig_f13(plt):
               "neither curve reaches saturation.")
 
 
-FIGURES = [fig_f1, fig_f2, fig_f3, fig_f4, fig_f5, fig_f6, fig_f7, fig_f8, fig_f9,
+FIGURES = [fig_f1, fig_f1_stacked, fig_f1_attributed, fig_f2, fig_f3, fig_f4, fig_f4_stacked, fig_f5, fig_f6, fig_f7, fig_f8, fig_f9,
            fig_f10, fig_f11, fig_f12, fig_f13]
 
 
@@ -3497,6 +3748,9 @@ def write_provenance(db_path, started):
 SECTIONS = [
     ("R0", "run inventory", lambda c, a: r0_inventory(c, a)),
     ("R1", "detection", lambda c, a: r1_detection(c, a)),
+    ("R1n", "uninjected anchor", lambda c, a: r1_normal_anchor(c, a)),
+    ("R1a", "detection attribution", lambda c, a: r1_attribution(c, a)),
+    ("R1c", "cells under the attribution rule", lambda c, a: r1_cells_attributed(c, a)),
     ("R1x", "detection supporting analyses", None),        # needs R1's per-cell structure
     ("R2", "false positives", lambda c, a: r2_false_positives(c, a)),
     ("R2s", "baseline staleness", lambda c, a: r2_regime_shift(c, a)),
@@ -3785,6 +4039,46 @@ def summary_detection(L):
                       where=lambda r: r["campaign"].startswith(("B", "C")),
                       sort=lambda r: (r["campaign"][0], r["device"], r["type"],
                                       r["magnitude"])))
+    A("### 2.1a Detection attribution, and the one point it puts in doubt `[derived]`")
+    A("")
+    A("A trial counts as detected under the pre-registered rule: any window intersecting "
+      "the injection is above normal. That rule cannot separate the injection from an "
+      "unrelated event landing in the same window, so the peak window of every detected "
+      "trial is checked against the feature its injected type actually drives. This is a "
+      "diagnostic and nothing is reclassified by it: changing the detection rule after "
+      "seeing the results would be the tunable free parameter the protocol forbids, and "
+      "every rate in this file uses the rule unchanged.")
+    A("")
+    L.extend(md_table("R1-attribution-check.csv",
+                      ["device", "campaign", "type", "magnitude", "injection_start_utc",
+                       "peak_d2", "top_feature", "top_share_percent", "expected_features",
+                       "novelty_hit", "top_zscores", "note"],
+                      ["device", "campaign", "type", "magnitude", "start UTC", "peak D2",
+                       "top feature", "share %", "expected", "novelty hit",
+                       "top z-scores", "note"],
+                      where=lambda r: r["consistent"] == "0"))
+    A("**One detected trial in thirty-four is carried by the wrong feature**, and it is "
+      "sensor-01 volume at 1.5x. The other three trials of that cell peak at 9.06, 9.02 "
+      "and 8.76 and are all led by `bytes_out_rate` at a share of 56 to 68 percent, which "
+      "is what scaling the payload does. The detected trial peaks at 29.83 led by "
+      "`std_iat_out` at **-3.34**, with `mean_iat_out` at -2.15 and `bytes_out_rate` "
+      "contributing only 15 percent. A negative `std_iat_out` means the traffic became "
+      "**more regular**, which is a timing signature and not a volume one, and it matches "
+      "the upstream endpoint degradation class in F7 rather than any injection.")
+    A("")
+    A("`F1a-detection-vs-magnitude-attributed` draws the ladder under this rule, applied "
+      "uniformly to all 34 detected trials, beside `F1` and `F1v` which use the "
+      "pre-registered rule. The cell counts under both rules are in "
+      "`csv/R1-cells-attributed.csv`. One cell of twelve moves.")
+    A("")
+    A("**The consequence for F1 is specific.** The 1/3 plotted for sensor-01 at 1.5x rests "
+      "on a window whose distance was carried by something other than the injection. Under "
+      "the pre-registered rule it is a detection and it stays plotted as one. Read by "
+      "feature attribution the cell is 0/3, which would make the sensor-01 volume curve "
+      "monotonic. The report should quote 1/3 and state this caveat rather than quietly "
+      "choosing either number, and the cell needs the five repetitions the protocol "
+      "specifies before the point can carry weight.")
+    A("")
     A("**The volume curve saturates and stays saturated.** Detection reaches 3/3 at 3x on "
       "both nodes and holds at 5x, where the peak distance is roughly 7x the alert "
       "threshold on plug-01 and 6x on sensor-01. **Cadence at 8x reached the block tier on "
@@ -3969,14 +4263,14 @@ def summary_false_positives(L):
       "resolver is taken away. The number of raw addresses behind each key is in "
       "`csv/R2-destination-keys.csv`.")
     A("")
-    A("### 3.5 Added section: baseline staleness, the margin that erodes silently `[derived]`")
+    A("### 3.5 Baseline staleness: the margin that erodes silently `[derived]`")
     A("")
-    A("**Why this is here.** F8 makes a sustained level shift visible partway through the "
-      "false positive exposure, and a reader will ask about it. The baselines are frozen "
-      "and no device was touched, so a persistent change in the quiescent distance is the "
-      "traffic drifting away from what was learned. It conditions the RQ2 rate, and it is "
-      "the only measurement in the project that bears on **how long a frozen baseline "
-      "stays valid**, which the report otherwise has to assert.")
+    A("F8 shows a sustained level shift partway through the false positive exposure. The "
+      "baselines are frozen and no device was touched, so a persistent change in the "
+      "quiescent distance is the traffic drifting away from what was learned. It "
+      "conditions the RQ2 rate, and it is the only measurement in the project that bears "
+      "on **how long a frozen baseline stays valid**, which the report otherwise has to "
+      "assert.")
     A("")
     A("The split point is chosen by the data rather than by eye: the interior cut that "
       "maximises the ratio of median distance after to median distance before.")
@@ -4058,8 +4352,7 @@ def summary_enforcement(L):
           "median %.2f ms, range %.2f to %.2f ms, n=%d.** Both timestamps are Pi-local, so "
           "the node clock offset does not enter this figure and it is the one number in "
           "the project that may be quoted at sub-second resolution. This is the quantity "
-          "that separates an enforcing system from a detector, and it was previously "
-          "recorded as unmeasured."
+          "that separates an enforcing system from a detector."
           % (float(np.median(lat)), min(lat), max(lat), len(lat)))
         A("")
     A("### 4.2 Withdrawal, and the first defect `[run]`")
@@ -4200,8 +4493,7 @@ def summary_resource(L):
         A("**This has a direct consequence the report must not get wrong.** The %.0fx "
           "headroom implied by the median duty cycle does **not** license the statement "
           "that this subnet's traffic could grow by that multiple before real-time "
-          "processing fails, and an earlier note in the resource file that read the "
-          "headroom that way is not supported by this larger sample. Over the range observed here the cost "
+          "processing fails. Over the range observed here the cost "
           "of a chunk is dominated by contention on a box that is simultaneously routing, "
           "resolving DNS and running the engine, not by the traffic in the chunk. The "
           "defensible claims are that **no chunk exceeded the rotation period over %s "
@@ -4247,18 +4539,15 @@ def summary_resource(L):
       "conditions, and the enforcement cost as the throughput difference between an empty "
       "and a populated `blocked_mac` set are all **NOT MEASURED**.")
     A("")
-    A("The blocker was re-checked for this build and is narrower than previously recorded. "
-      "**A usable traffic generator does exist on the IoT subnet**: the laptop already in "
-      "`exclude.macs` is present and answers from the gateway, so the earlier claim that "
-      "no host on that subnet could serve is wrong and should not be repeated in the "
-      "report. What blocks the measurement is tooling and operator action, not the "
-      "topology: no throughput tool is installed on the Pi, installing one needs "
-      "password-gated sudo, and the far end must run the peer side. **The report should "
-      "describe this as a bounded trial that remains available rather than as an "
-      "infeasible one**, and record that using a non-IoT host purely as a traffic source "
-      "would be a stated deviation, excluded from every detection and false positive "
-      "result. Finding the enforcement cost immeasurable would itself be the correct "
-      "result, and it remains unavailable rather than negative.")
+    A("**A usable traffic generator does exist on the IoT subnet**: the laptop already in "
+      "`exclude.macs` is present and answers from the gateway. What blocks the measurement "
+      "is tooling and operator action rather than the topology: no throughput tool is "
+      "installed on the Pi, installing one needs password-gated sudo, and the far end must "
+      "run the peer side. **This is a bounded trial that remains available rather than an "
+      "infeasible one**, and using a non-IoT host purely as a traffic source would be a "
+      "stated deviation, excluded from every detection and false positive result. Finding "
+      "the enforcement cost immeasurable would itself be the correct result, and it "
+      "remains unavailable rather than negative.")
     A("")
     A("---")
     A("")
@@ -4310,11 +4599,11 @@ def summary_benchmark(L):
                        "episodes/device-day", "median D2"],
                       sort=lambda r: (r["device"], r["arm"])))
     A("**Every arm here counts false positives only.** Windows overlapping a ground_truth "
-      "injection span are excluded, exactly as arms C and D exclude every attacked window. "
-      "That was not true of an earlier build of this figure and it mattered: leaving the "
-      "injections in put 33 of sensor-01's 35 arm A distance flags, and every one of "
-      "plug-01's 22 arm A novelty events, on the injected beacon rather than on anything "
-      "the device did unprompted.")
+      "injection span are excluded, exactly as arms C and D exclude every attacked window, "
+      "so no arm counts a true positive. The exclusion is load bearing rather than "
+      "cosmetic: on the instrumented nodes the injections account for 33 of sensor-01's 35 "
+      "arm A distance flags and for every one of plug-01's 22 arm A novelty events, so "
+      "counting them would report the campaign's own beacon as a false positive.")
     A("")
     A("**The ablation effect falls almost entirely on the discrete novelty path.** Windows "
       "over `t_alert` barely move between the arms and the median distance does not move "
@@ -4626,13 +4915,13 @@ def summary_endpoint(L):
       "opposite of a cadence anomaly. **The report must say this effect was observed but "
       "not isolated experimentally.**")
     A("")
-    A("### 9.2 Added section: cross-device baseline transfer `[derived]`")
+    A("### 9.2 Cross-device baseline transfer `[derived]`")
     A("")
-    A("**Why this is here.** The report needs to answer whether a per-device baseline can "
-      "be pre-trained and shipped, or whether every unit pays its own learning window. "
-      "That is the deployability half of the question R8 was designed to ask, and it is "
-      "answerable from stored rows even though the endpoint swap is not. It is a different "
-      "experiment, between devices rather than within one, and is labelled as such.")
+    A("Whether a per-device baseline can be pre-trained and shipped, or whether every unit "
+      "pays its own learning window, is the deployability half of the question R8 was "
+      "designed to ask, and it is answerable from stored rows even though the endpoint "
+      "swap is not. This is a transfer experiment between devices rather than within one, "
+      "and is labelled as such.")
     A("")
     A("Each device's trusted normal windows are scored against every active baseline, "
       "injections and applied enforcement removed.")
@@ -4713,34 +5002,92 @@ def summary_annex(L):
 
 
 FIGURE_INVENTORY = [
-    ("F1", "F1-detection-vs-magnitude", "F3-distance-separation.csv via R1-cells.csv",
-     "Detection rate against injected magnitude, one panel per instrumented node, Wilson "
-     "95 percent intervals as error bars, n marked at every point.",
-     "That detection is not a step function; where the knee sits on each device; and that "
-     "the curve is plotted from the floor, so the non-separable low magnitudes are visible "
-     "rather than cropped out. Destination is shown as a marked point because a single "
-     "level is not a curve."),
+    ("F1", "F1-detection-vs-magnitude",
+     "R1-cells.csv, R1-normal-anchor.csv",
+     "Detection rate against injected magnitude over the volume ladder, anchored at normal "
+     "traffic and running to 5x, one panel per instrumented node, side by side at two "
+     "column width. **The vertical bars are Wilson 95 percent confidence intervals on the "
+     "proportion, not a spread of measurements**: they say what long-run detection rate is "
+     "consistent with the trials run, and at three trials they are wide, which is the "
+     "correct message rather than a defect. The exposure behind every point is in "
+     "`R1-cells.csv` and in the section 2.1 table rather than on the figure. **Caption: Figure N Detection rate against "
+     "injected magnitude, per instrumented node. a) plug-01 b) sensor-01** "
+     "Cells with three repetitions carry a Wilson 95 percent interval as error bars; the "
+     "single-trial 5x cell is drawn as a hollow marker with no interval, because one "
+     "repetition supports none.",
+     "That detection is not a step function, where the knee sits on each device, and that "
+     "it saturates from 3x and stays saturated at 5x. The curve is plotted from the floor, "
+     "so the non-separable low magnitudes are visible rather than cropped out, and the "
+     "hollow marker tells the reader at a glance which point rests on a single trial and "
+     "therefore carries no interval at all. "
+     "Destination is a marked point off the ladder axis because a single level is not a "
+     "curve. The leftmost point is the fraction of uninjected windows the detector flags "
+     "on the same device over the same run, which gives the curve a zero point; it is a "
+     "per-window rate where the ladder points are per-trial detection rates, so it carries "
+     "its own marker and its own legend entry."),
+    ("F1v", "F1v-detection-vs-magnitude-stacked",
+     "R1-cells.csv, R1-normal-anchor.csv",
+     "The same figure and the same data as F1, stacked one panel above the other at single "
+     "column width. Drawn by the same panel code as F1, so the two cannot disagree; only "
+     "the layout differs. The magnitude axis is shared, so only the lower panel carries "
+     "tick labels.",
+     "Everything F1 shows. Use this version where the layout gives a single column, 8.6 cm, "
+     "which the side-by-side version cannot fit; use F1 across two columns. **Caption: as F1.**"),
+    ("F1a", "F1a-detection-vs-magnitude-attributed",
+     "R1-cells-attributed.csv, R1-attribution-check.csv",
+     "The stacked ladder under the attribution-consistent rule: a trial counts as a "
+     "detection only when the feature carrying its peak window's distance is one the "
+     "injected type actually drives, or the discrete novelty rule fired. Same data, panel "
+     "code and styling as F1v; only the counting rule differs, and the y axis says so.",
+     "What the ladder looks like if a detection has to be attributable to the injection "
+     "rather than merely coincident with it. The rule is applied uniformly to all 34 "
+     "detected trials and moves exactly one cell, sensor-01 volume at 1.5x, from 1/3 to "
+     "0/3, which makes that device's curve monotonic. **This is an alternative reading, "
+     "not a correction.** F1 and F1v carry the pre-registered rule and are the figures the "
+     "headline rates come from; this one belongs beside them as a sensitivity check, and "
+     "the report must say which rule it is quoting. **Caption: Figure N Detection rate "
+     "against injected magnitude under the attribution-consistent rule, per instrumented "
+     "node. a) plug-01 b) sensor-01**"),
     ("F2", "F2-windows-to-detection", "R1-trials.csv",
-     "Distribution of windows to detection per device and anomaly type, every trial "
-     "visible as a point with the median drawn as a bar, and the architectural floor as a "
-     "horizontal reference.",
-     "That the median is small, and that the floor is architectural rather than a "
-     "limitation of the method: nothing is detectable in under roughly one window plus "
-     "pipeline lag."),
+     "Distribution of windows to detection per device and anomaly type, every detected "
+     "trial visible as a point with the median drawn as a bar, the trial count under each "
+     "group, and the architectural floor as a horizontal reference. Colour and marker "
+     "follow the anomaly type, so a type reads the same in both device blocks.",
+     "That the median is one window in every cell, that the two trials needing more are "
+     "both volume at the magnitudes nearest the knee, and that the floor is architectural "
+     "rather than a limitation of the method: nothing is detectable in under roughly one "
+     "window plus pipeline lag."),
     ("F3", "F3-distance-separation", "F3-distance-separation.csv",
      "Per device, the D2 distribution of normal windows against injected windows grouped "
-     "by magnitude, log Y axis, with t_alert and t_critical drawn.",
+     "by cell, log Y axis, with t_alert and t_critical drawn and the window count under "
+     "each box. Restricted to the cells with three repetitions: a box over the five "
+     "windows of a single trial is not a distribution, and the cadence ladder is split "
+     "across two run labels so drawing one of its rungs here and not the others would be "
+     "arbitrary. The single-trial cells and the full cadence ladder are in F13.",
      "Margin rather than a binary outcome. In particular that the weakest volume level "
      "sits inside the normal envelope, so no threshold detects it while keeping normal "
      "traffic quiet, and that the two connection lifecycles differ structurally."),
     ("F4", "F4-benchmark-decomposition", "R5-arms-AB-live.csv, "
      "R5-benchmark-false-positives.csv",
-     "Grouped bars over arms A to D across the shared metrics, with the A-to-B and B-to-C "
-     "steps annotated as quantities.",
+     "Grouped bars over arms A to D across the shared metrics, with all three steps "
+     "annotated as quantities. **Caption: Figure N False positives and destination key "
+     "composition across the four evaluation arms. a) windows flagged, percent b) windows "
+     "flagged per device-day c) destination keys, domain against prefix**",
      "That the benchmark-to-live gap decomposes, and roughly how it splits between the "
      "missing resolver and everything else. It must never be read as a single transfer "
      "score. Note that the per-device-day panel divides by a 5 h benchmark exposure "
      "against several live days, so the percent-flagged panel is the fairer comparison."),
+    ("F4v", "F4v-benchmark-decomposition-stacked", "R5-arms-AB-live.csv, "
+     "R5-benchmark-false-positives.csv",
+     "The same decomposition and the same data as F4, stacked at single column width. "
+     "Drawn by the same panel code as F4, so the two cannot disagree; only the layout "
+     "differs.",
+     "Everything F4 shows. Use this where the layout gives a single column, 8.6 cm; use F4 "
+     "across two columns. At 8.2 by 11.6 cm it stays under half a page, so it does not "
+     "fall in the band between half a page and a full page that the template forbids. "
+     "**Caption: as F4.** Keep the exposure caveat in the body rather than the caption: "
+     "panel b divides the benchmark arms by a 5.2 h slice against several days on the "
+     "live arms, so panel a is the like-for-like comparison."),
     ("F5", "F5-detection-vs-coverage", "R5-dilution-buckets.csv",
      "Benchmark only. Detection rate against how much of the 300 s window the annotated "
      "attack covers, with the window count printed at each point.",
@@ -4816,7 +5163,9 @@ def summary_figures(L):
       "column 8.6 cm, two columns 17.5 cm, at most four lettered subfigures each with its "
       "own caption, no title inside the figure because the caption carries it, and every "
       "series distinguished by dash pattern and marker as well as colour so a greyscale "
-      "print is still readable. The colours are separated in lightness for the same "
+      "print is still readable. The `.eps` is vector and resolution independent; the "
+      "`.png` is exported at **600 dpi**, which is the copy to place in the submission "
+      "template, because current versions of Word cannot import EPS. The colours are separated in lightness for the same "
       "reason. Every panel has the CSV that produced it.")
     A("")
     for key, fname, backing, shows, read in FIGURE_INVENTORY:
@@ -4848,19 +5197,17 @@ def summary_figures(L):
 NOT_MEASURED = [
     ("Routing throughput with and without SENTRI, and forwarding latency",
      "R4 / RQ constraint",
-     "**Checked rather than assumed, and the previously recorded blocker was too strong.** "
-     "The candidate traffic generator does exist: the laptop already in `exclude.macs` is "
-     "present on the IoT subnet and answers from the gateway, so the earlier statement "
-     "that no host on that subnet could serve is wrong. What is actually missing is "
-     "tooling and operator action: no throughput tool (`iperf3`, `iperf`, `netperf`, "
-     "`nuttcp`) is installed on the Pi, installing one needs a password-gated sudo, and "
-     "the far end would have to run the peer side, which is outside what this analysis "
-     "can drive. The trial is therefore available to an operator and was not run.",
-     "The report cannot yet state the cost of capture separately from the cost of "
-     "analysis, or quantify the routing overhead a deployer would pay. It should describe "
-     "this as a trial not yet run rather than as an infeasible one, and note that a "
-     "non-IoT host used purely as a traffic source would be a stated deviation, excluded "
-     "from every detection and false positive result."),
+     "A candidate traffic generator exists: the laptop already in `exclude.macs` is "
+     "present on the IoT subnet and answers from the gateway. What is missing is tooling "
+     "and operator action: no throughput tool (`iperf3`, `iperf`, `netperf`, `nuttcp`) is "
+     "installed on the Pi, installing one needs a password-gated sudo, and the far end "
+     "would have to run the peer side, which is outside what this analysis can drive. The "
+     "trial is available to an operator and was not run.",
+     "The report cannot state the cost of capture separately from the cost of analysis, "
+     "or quantify the routing overhead a deployer would pay. It should describe this as a "
+     "trial not yet run rather than an infeasible one, and note that a non-IoT host used "
+     "purely as a traffic source would be a stated deviation, excluded from every "
+     "detection and false positive result."),
     ("Enforcement cost as the throughput difference between an empty and a populated "
      "blocked_mac set", "R4 / RQ3",
      "The same throughput rig, plus root to populate the set. Note that finding this cost "
@@ -4909,7 +5256,7 @@ NOT_MEASURED = [
      "deliberately, which the same throughput blocker prevents.",
      "The report can state that the pipeline kept up over more than two diurnal cycles "
      "with no chunk exceeding the rotation period, and must not state how far traffic "
-     "could grow before it stopped keeping up. The earlier sevenfold reading is withdrawn."),
+     "could grow before it stopped keeping up."),
     ("The cause of the long-chunk tail", "R4",
      "The slowest chunks are not the largest, so the tail is contention on a box that is "
      "simultaneously routing, resolving DNS and running the engine. Isolating which "
@@ -4941,10 +5288,10 @@ NOT_MEASURED = [
      "most plausibly misfire on, so its false positive behaviour on that case is unknown "
      "rather than good."),
     ("The top rung of the volume and cadence ladders", "R1 / figures F1 and F13",
-     "The protocol specifies volume to 10x and cadence to 16x. Campaign C added the 5x and "
-     "8x rungs on 2026-08-28, so the ladders now run to 5x and 8x and the top rung of each "
-     "remains unrun. Both remaining levels are defined in the campaign tool's ladder and "
-     "neither node caps the multiplier, so they are runnable at about an hour per trial.",
+     "The protocol specifies volume to 10x and cadence to 16x. The volume ladder runs to "
+     "5x and the cadence ladder to 8x, so the top rung of each is unrun. Both remaining "
+     "levels are defined in the campaign tool's ladder and neither node caps the "
+     "multiplier, so they are runnable at about an hour per trial.",
      "The report can state the knee of the volume curve, that detection saturates from 3x "
      "on both devices and holds at 5x, and that cadence rises monotonically to 8x where it "
      "reaches the block tier. It cannot state the ceiling of either response. **No point "
@@ -4952,6 +5299,18 @@ NOT_MEASURED = [
      "extrapolated rung presented as a measurement would be fabricated data, and the "
      "repetition count of every plotted cell is marked so a reader can see which levels "
      "were injected and how often."),
+    ("Whether sensor-01 detects volume at 1.5x at all", "R1 section 2.1a / figure F1",
+     "The cell is 1/3, and the one detection is carried by `std_iat_out` at -3.34 rather "
+     "than by the byte rate the injection drives, so it is consistent with a coincident "
+     "timing event rather than with the injection. The pre-registered detection rule "
+     "counts it and it stays counted; feature attribution says the cell is really 0/3. "
+     "Three repetitions cannot settle which, and the cell was never run at the five the "
+     "protocol specifies.",
+     "The plotted 1/3 is the honest figure under the stated rule, but the report must not "
+     "lean on it. In particular the dip between 1.5x and 2x in F1 panel (b) is an artefact "
+     "of this single trial: sensor-01 misses 2x on 4 of 4 attempts with peaks clustered at "
+     "18.2 to 20.9 against a threshold of 24.32, which is the more reliable statement "
+     "about the device's volume sensitivity."),
     ("Cadence and protocol cells at more than one repetition", "R1",
      "Cadence was excluded from campaign B on the judgement that repeating an unambiguous "
      "result buys little. That is a judgement, not a measurement. Both protocol cells are "
@@ -5086,6 +5445,14 @@ def summary_answers(L):
          dest[1]["detection_rate"] if len(dest) > 1 else "n/a",
          v3[0]["wilson_95ci"] if v3 else "n/a",
          float(np.median(wtd)) if wtd else 1))
+    A("")
+    A("**Detection saturates well below the top of the ladder, and cadence is the cheapest "
+      "anomaly to catch.** Volume reaches 3/3 at 3x on both nodes and holds at 5x, where "
+      "the peak distance is 7.8 and 6.5 times the alert threshold; cadence at 8x scored "
+      "2152 and 1852 against a critical threshold of 243 and **reached the block tier on "
+      "both nodes**, the only cell in the live campaign besides the destination beacon and "
+      "the protocol swap to do so. The 5x and 8x cells are single trials and carry no "
+      "interval.")
     A("")
     A("**The transport model, not the magnitude, governs which detection path fires.** A "
       "port swap costs the persistent-socket node its connection and produces the largest "

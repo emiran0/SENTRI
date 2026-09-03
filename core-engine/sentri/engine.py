@@ -25,12 +25,12 @@ def run(conf):
     enforce.sync_from_db(conn, conf)
     dnslog = extract.DnsLog(conf["paths"]["pihole_log"])
     windower = extract.Windower([d["mac"] for d in db.all_devices(conn)])
-    chunk_end = 0.0
+    chunk_end = 0.0  # where the last chunk should have ended, for gap detection
     last_poll = 0.0
     log.info("engine started, mode %s, label %s", conf["enforcement"]["mode"], conf["run_label"])
     while True:
         for path, name, start in capture.pending(conf):
-            # a gap between chunks means capture stopped, so observation restarts here
+            # gap means capture stopped, restart observation here
             if start - chunk_end > extract.WINDOW_SECONDS:
                 windower.start_segment(start)
             process_chunk(conn, conf, dnslog, windower, path, start)
@@ -45,20 +45,12 @@ def run(conf):
 
 
 def replay(conf, directory, limit=None):
-    """Section 18.1: drive the pipeline over an archived capture instead of a live one.
-
-    `capture.pending` cannot be reused. It filters on file mtime against wall clock, so a
-    downloaded capture is either always eligible or never; it tracks one global watermark;
-    and it writes to the production database. This iterates chunks in timestamp order with
-    none of that, against whatever database `paths.db` names, which for a replay must be a
-    separate file.
-
-    Everything downstream, extract through decide_tier, runs unmodified. That is the claim
-    RQ4 rests on, so nothing here may special-case the replay.
-    """
+    # same pipeline over an archived capture. capture.pending cannot be reused, it filters
+    # on mtime against wall clock and writes the live db. nothing below here may special
+    # case a replay, the benchmark claim rests on it being the same path
     conn = db.connect(conf["paths"]["db"])
-    # no resolver log for an archived capture, so every destination keys by prefix. that is
-    # the benchmark condition itself, not a defect, and section 19 arm B is its control
+    # no resolver log in an archive, so everything keys by prefix. that is the benchmark
+    # condition, not a defect, the prefix keyed arm is its own control
     dnslog = extract.DnsLog(conf["paths"].get("pihole_log") if conf["paths"] else None)
     windower = extract.Windower([d["mac"] for d in db.all_devices(conn)])
     chunks = []
@@ -73,13 +65,10 @@ def replay(conf, directory, limit=None):
     chunk_end = 0.0
     ips = {}
     for i, (path, name, start) in enumerate(chunks, 1):
-        # a live stream flushes window N when chunk N+1 arrives. An archived capture can be
-        # sparse, with hours between chunks, so a window whose successor never comes would
-        # sit in the buffer for ever and be lost. Flush before every gap, and again at the
-        # end, or a sparse dataset silently yields almost no windows.
+        # live, window N flushes when chunk N+1 lands. an archive can be sparse, so a window
+        # whose successor never comes just sits there. flush before every gap and at the end
         if start - chunk_end > extract.WINDOW_SECONDS:
-            # only flush if a segment has actually run: before the first chunk the windower
-            # has no per-MAC position yet and ready() would dereference None
+            # only once a segment has run, before the first chunk ready() hits a None position
             if chunk_end:
                 windower.advance(chunk_end + extract.WINDOW_SECONDS)
                 drain_windows(conn, conf, dnslog, windower, ips)
@@ -110,13 +99,12 @@ def process_chunk(conn, conf, dnslog, windower, path, start):
     windower.add(packets)
     windower.advance(start + extract.WINDOW_SECONDS)
     drain_windows(conn, conf, dnslog, windower, device_ips)
-    # the load bearing resource figure is this against the 300 s rotation period: if it
-    # approaches the period the Pi cannot keep up in real time. section 20 of the
-    # methodology notes reports it as a duty cycle, so it has to be logged per chunk
+    # this against the 300 s rotation is the duty cycle. if it gets close the Pi is
+    # not keeping up, so log it per chunk
     elapsed = time.monotonic() - t0
     log.info("chunk %s: %d packets, %d devices, parse %.2fs, in %.2fs",
              os.path.basename(path), len(packets), len(device_ips), t_parse - t0, elapsed)
-    # returned so a replay can carry the address map across a gap and still flush windows
+    # returned so a replay can carry the address map across a gap
     return device_ips
 
 
@@ -140,12 +128,12 @@ def process_window(conn, conf, dnslog, mac, window_start, duration, pkts, ip):
             dests, counters["services"], base)
         novel = new_dests + new_services
         hits = score.discrete_hits(new_dests, new_services)
-    previous = db.prev_window(conn, mac, window_start)
+    previous = db.prev_window(conn, mac, window_start)  # novelty needs the one before
     complete = 1 if duration >= extract.COMPLETE_MIN else 0
     window_id = db.add_window(conn, mac, window_start, duration, complete, len(pkts), feats,
                               counters, novel, conf["run_label"])
     if window_id is None:
-        return
+        return  # already stored, do not score it twice
     db.update_device(conn, mac, last_seen=window_start + extract.WINDOW_SECONDS)
     if dev["state"] == "learning":
         check_learning(conn, conf, mac, dev, window_start)
@@ -158,10 +146,10 @@ def process_window(conn, conf, dnslog, mac, window_start, duration, pkts, ip):
 def check_learning(conn, conf, mac, dev, now):
     windows = baseline.usable(conn, mac, dev, conf)
     status = baseline.gates(windows, dev, conf)
-    forced = baseline.expired(dev, now, conf)
+    forced = baseline.expired(dev, now, conf)  # hard stop, fit whatever we have
     passed = status["windows"] and status["duration"] and status["stability"]
     if not passed and not forced:
-        if len(windows) % 20 == 0:
+        if len(windows) % 20 == 0:  # every window would be noise in the log
             log.info("%s learning blocked: %s", mac, status["detail"])
         return
     baseline_id = baseline.fit(conn, mac, dev, conf, forced)
@@ -177,8 +165,7 @@ def monitor(conn, conf, mac, dev, window_id, window_start, feats, base, hits, pr
             trusted):
     d2, contributions, zscores = score.distance(extract.to_vector(feats, base["names"]), base)
     before = score.hard_novelty(json.loads(previous["new_dests_json"])) if previous else False
-    # the score is still recorded, so nothing is lost from the evaluation record, but a
-    # window the operator has already overruled must not move the tier or the streak
+    # still recorded for the evaluation record, it just must not move the tier or the streak
     if score.superseded_by_clear(window_start, dev["cleared_at"]):
         db.add_score(conn, window_id, base["id"], mac, d2, dev["tier"], contributions, zscores)
         log.info("%s window %d predates the operator clear, tier decision skipped (d2 %.1f)",
@@ -208,7 +195,7 @@ def auto_clear(conn, conf):
         dev = db.get_device(conn, row["mac"])
         enforce.clear(row["mac"], dev["ip"] if dev else None)
         db.add_enforcement(conn, row["mac"], "normal", "auto clear")
-        # auto clear is an authoritative clear too, so queued windows must not undo it
+        # authoritative too, so queued windows must not undo it
         db.update_device(conn, row["mac"], tier="normal", consecutive_count=0, recent_flags=0,
                          cleared_at=now)
         db.add_event(conn, row["mac"], now, "normal", "auto_clear",
@@ -220,7 +207,7 @@ def poll_ground_truth(conn, conf):
         mac = mac.lower()
         since = db.last_ground_truth_ms(conn, mac)
         url = "http://%s:8080/log?since=%d" % (host, since)
-        # nodes reboot and drop connections during experiments, so this one really can fail
+        # nodes reboot mid experiment, this really does fail
         try:
             body = urllib.request.urlopen(url, timeout=5).read().decode()
             entries = [json.loads(line) for line in body.splitlines() if line.strip()]

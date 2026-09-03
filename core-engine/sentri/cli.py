@@ -68,8 +68,8 @@ def cmd_refit(conn, conf, args):
         feats = json.loads(window["features_json"])
         d2, contributions, zscores = score.distance(
             extract.to_vector(feats, base["names"]), base)
-        # a stateless per window severity, so a false positive count is one GROUP BY,
-        # and the stored novelty reflects the old destination set so it is not replayed
+        # stateless per window severity, so a false positive count is one GROUP BY. novelty
+        # is not replayed, the stored one belongs to the old dest set
         tier = "normal"
         if not score.trusted_distance(window["packets"], window["complete"], conf):
             tier = "unusable"
@@ -90,10 +90,8 @@ def cmd_unblock(conn, conf, args):
     for dev in targets:
         enforce.clear(dev["mac"], dev["ip"])
         db.add_enforcement(conn, dev["mac"], "normal", "manual unblock")
-        # recent_flags has to clear with the streak, or the next anomalous window lands on
-        # a primed escalation window and re-enforces immediately after a manual clear.
-        # cleared_at makes the operator's decision authoritative over the windows still in
-        # the capture queue, which are minutes old and describe the state just overruled
+        # recent_flags clears with the streak, or the next window lands on a primed escalation
+        # window. cleared_at outranks the windows still queued from before the clear
         db.update_device(conn, dev["mac"], tier="normal", consecutive_count=0, recent_flags=0,
                          cleared_at=time.time())
         db.add_event(conn, dev["mac"], time.time(), "normal", "unblock", "manual unblock", {})
@@ -113,6 +111,7 @@ def write_csv(conn, table, path):
         for key in row:
             if key not in columns:
                 columns.append(key)
+    # columns = sorted({k for r in flat for k in r})  # loses the column order
     with open(path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=columns)
         writer.writeheader()
@@ -138,9 +137,8 @@ def flatten(row):
 def main():
     parser = argparse.ArgumentParser(prog="sentri")
     parser.add_argument("--config", default="config.yaml")
-    # a replay must not write into the live database, and a run label must not be shared
-    # between a live phase and a benchmark one. both are overridable per invocation so a
-    # replay needs no second config file
+    # a replay must not write the live db, and must not share a label with a live phase.
+    # overridable per invocation so a replay needs no second config file
     parser.add_argument("--db", default=None, help="override paths.db, required for replay")
     parser.add_argument("--label", default=None, help="override run_label")
     subs = parser.add_subparsers(dest="command", required=True)

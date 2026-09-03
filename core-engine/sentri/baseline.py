@@ -10,8 +10,8 @@ from .extract import FEATURES, WINDOW_SECONDS, to_vector
 
 log = logging.getLogger("sentri")
 CALIB_CHUNKS = 10
-CALIB_HOLDOUT = (4, 9)
-RIDGE = 1e-6
+CALIB_HOLDOUT = (4, 9)  # middle and tail, not two neighbours
+RIDGE = 1e-6  # keeps the inverse from blowing up on a near singular cov
 
 
 def usable(conn, mac, dev, conf):
@@ -24,6 +24,7 @@ def usable(conn, mac, dev, conf):
         if not w["packets"] and not conf["learning"]["learn_include_empty"]:
             continue
         start = w["window_start"]
+        # overlaps an injection, ground truth says it is dirty
         if any(a < start + WINDOW_SECONDS and b > start for a, b in spans):
             continue
         keep.append(w)
@@ -36,6 +37,7 @@ def gates(windows, dev, conf):
         return {"windows": False, "duration": False, "stability": False, "detail": "no windows"}
     hours = (windows[-1]["window_start"] - dev["learning_started"]) / 3600.0
     cut = int(len(windows) * (1 - learn["stability_fraction"]))
+    # dests only ever seen in the tail means the device has not settled yet
     early, late = set(), set()
     for i, w in enumerate(windows):
         keys = json.loads(w["counters_json"]).get("dests", {}).keys()
@@ -65,6 +67,7 @@ def valid_names(names, where):
 def distances(matrix, mean, scale, precision):
     z = (matrix - mean) / scale
     return np.einsum("ij,jk,ik->i", z, precision, z)
+    # return np.array([r @ precision @ r for r in z])  # same thing, too slow on the Pi
 
 
 def pick_thresholds(calib_d2, dims, conf):
@@ -75,14 +78,14 @@ def pick_thresholds(calib_d2, dims, conf):
         "p99": float(np.percentile(calib_d2, 99)),
         "max": float(calib_d2.max()),
     }
-    # all three are stored every fit so a threshold rule comparison needs only a re-score
+    # all three stored every fit, so comparing rules is just a re-score
     candidates = {
         "max_margin": calib["max"] * rules["alert_margin"],
         "p99_margin": calib["p99"] * rules["alert_margin"],
         "p95_margin": calib["p95"] * rules["alert_margin"],
         "chi2": float(chi2.ppf(0.999, dims)),
     }
-    # the chi2 floor stops a quiet calibration slice setting a threshold below the noise
+    # chi2 floor, a quiet calib slice would otherwise put t_alert under the noise
     t_alert = max(candidates[rules["rule"]], candidates["chi2"])
     return {
         "rule": rules["rule"],
@@ -103,21 +106,21 @@ def fit(conn, mac, dev, conf, forced=False):
         log.warning("%s cannot fit, only %d usable windows", mac, len(windows))
         return None
     matrix = np.array([to_vector(json.loads(w["features_json"]), names) for w in windows])
-    # hold out two spread chunks, a tail slice between two cloud check ins sees idle alone
+    # two spread chunks, a plain tail slice can land between cloud check ins and see idle only
     starts = np.array([w["window_start"] for w in windows])
     span = max(1, int(starts[-1] - starts[0]) + 1)
     held = np.isin((starts - starts[0]) * CALIB_CHUNKS // span, CALIB_HOLDOUT)
     if len(matrix) - int(held.sum()) <= len(names) + 1 or held.sum() < 2:
         held = np.zeros(len(matrix), dtype=bool)
-        held[-1] = True
+        held[-1] = True  # too few windows to spread, last one it is
     train, calib = matrix[~held], matrix[held]
     mean = train.mean(axis=0)
     floors = np.array([conf["variance_floors"].get(f, 0.0) for f in names])
     if not floors.all():
         raise ValueError("variance_floors missing for: " + ", ".join(
             n for n, f in zip(names, floors) if not f))
-    # standardise before shrinkage: LedoitWolf shrinks toward trace over p times the
-    # identity, so one feature measured in bytes drowns every log scale feature
+    # standardise first, LedoitWolf shrinks toward trace/p times identity so a bytes scale
+    # feature would drown the log scale ones
     scale = np.maximum(train.std(axis=0), floors)
     cov = LedoitWolf(assume_centered=True).fit((train - mean) / scale).covariance_
     cov = cov + RIDGE * np.eye(len(names))
@@ -137,7 +140,7 @@ def fit(conn, mac, dev, conf, forced=False):
         "n_calib": len(calib),
         "scale": scale.tolist(),
         "correlation": cov.tolist(),
-        # a well conditioned fit lands near the feature count, far below means collinearity
+        # lands near the feature count when well conditioned, far below means collinearity
         "median_fit_d2": float(np.median(distances(train, mean, scale, precision))),
     }
     baseline_id = db.add_baseline(conn, mac, len(windows), mean.tolist(), precision.tolist(),
@@ -155,7 +158,7 @@ def load(conn, mac):
     dest_set = json.loads(row["dest_set_json"])
     quality = json.loads(row["quality_json"])
     stored = row["feature_names_json"]
-    # baselines fitted before the feature set was configurable used all twelve
+    # pre config baselines used all twelve
     names = valid_names(json.loads(stored) if stored else list(FEATURES), "baseline")
     return {
         "id": row["id"],
@@ -166,6 +169,6 @@ def load(conn, mac):
         "dests": set(dest_set["keys"]),
         "ips": set(dest_set["ips"]),
         "services": set(json.loads(row["service_set_json"])),
-        # a baseline fitted before standardisation has its precision in raw feature space
+        # pre standardisation baselines have precision in raw feature space, so ones
         "scale": np.array(quality["scale"]) if "scale" in quality else np.ones(len(names)),
     }

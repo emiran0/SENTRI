@@ -8,45 +8,49 @@
 
 #include "secrets.h"
 
-static WiFiClientSecure client;
+static WiFiClientSecure client;  // the one cloud socket, held open when PERSISTENT
 static WiFiUDP udp;
-static IPAddress cloud_ip;
-static uint64_t epoch_base_ms = 0;
-static uint64_t epoch_ref = 0;
+static IPAddress cloud_ip;  // resolved for the log, we still connect by name
+static uint64_t epoch_base_ms = 0;  // unix ms at the last ntp sync
+static uint64_t epoch_ref = 0;      // monotonic reading taken at that same moment
 static uint32_t backoff_ms = RECONNECT_BASE_MS;
 static int attempts = 0;
 static uint64_t next_try = 0;
-static char pad_block[128];
+static char pad_block[128];  // filler, only its length ever matters
 
 #if SENTRI_PROFILE == CAMERA
 static WiFiClientSecure media;
 #endif
 
+// millis() wraps every 49 days and a learning run is longer than that, so carry the high word
 uint64_t now64() {
   static uint32_t last = 0;
   static uint64_t high = 0;
   uint32_t ms = millis();
-  if (ms < last) high += 0x100000000ULL;
+  if (ms < last) high += 0x100000000ULL;  // went backwards, that is the wrap
   last = ms;
   return high + ms;
 }
 
+// ntp time plus however long the board has been up since that sync
 uint64_t epoch_ms() { return epoch_base_ms + (now64() - epoch_ref); }
 
+// same host, different port, which is the whole protocol anomaly
 uint16_t cloud_port() { return anomaly.protocol_swap ? SWAP_PORT : CLOUD_PORT; }
 
+// real devices announce themselves after dhcp, and the pi sees the broadcast
 static void gratuitous_arp() {
   if (netif_default) etharp_gratuitous(netif_default);
 }
 
 static bool wifi_join() {
   WiFi.mode(WIFI_STA);
-  WiFi.setHostname(DEVICE_NAME);
+  WiFi.setHostname(DEVICE_NAME);  // fixed, and no mac randomisation, the pi keys on both
   // modem sleep lets the AP buffer replies for a DTIM interval, which lands in std_iat_out
   WiFi.setSleep(false);
   WiFi.begin(WIFI_SSID, WIFI_PASS);
   uint32_t start = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - start < 20000) delay(200);
+  while (WiFi.status() != WL_CONNECTED && millis() - start < 20000) delay(200);  // 20 s, then stop
   return WiFi.status() == WL_CONNECTED;
 }
 
@@ -62,6 +66,7 @@ void net_close() { client.stop(); }
 
 int net_send(const char *data, int len) { return client.write((const uint8_t *)data, len); }
 
+// returns bytes read, headers included, which is close enough to the reply size for the log
 int net_recv(uint32_t timeout_ms) {
   client.setTimeout(timeout_ms);
   char line[160];
@@ -71,8 +76,8 @@ int net_recv(uint32_t timeout_ms) {
     int n = client.readBytesUntil('\n', line, sizeof(line) - 1);
     if (n <= 0) return total;
     line[n] = 0;
-    total += n + 1;
-    if (n == 1) break;
+    total += n + 1;  // the \n was consumed but not stored
+    if (n == 1) break;  // bare \r, so that was the blank line ending the headers
     if (!strncasecmp(line, "Content-Length:", 15)) content = atoi(line + 15);
   }
   // the body must be drained fully or the next keep-alive request reads a stale reply
@@ -86,6 +91,12 @@ int net_recv(uint32_t timeout_ms) {
   return total;
 }
 
+// int build_request(char *buf, const char *method, const char *path, const char *host) {
+//   return snprintf(buf, REQ_MAX, "%s %s HTTP/1.1\r\nHost: %s\r\n\r\n", method, path, host);
+// }
+// no padding, so the outbound size was whatever the header text happened to add up to
+
+// fills buf with headers and reports how much filler the caller still has to write
 int build_request(char *buf, const char *method, const char *path, const char *host,
                   int body_len, int target, int *pad) {
   const char *conn = PERSISTENT ? "keep-alive" : "close";
@@ -95,9 +106,10 @@ int build_request(char *buf, const char *method, const char *path, const char *h
     n += snprintf(buf + n, REQ_MAX - n,
                   "Content-Type: application/octet-stream\r\nContent-Length: %d\r\n", body_len);
   // the padding header is what makes the outbound size land on the configured value
+  // 7 is "X-Pad: " and 4 is the "\r\n\r\n" that closes the headers after the filler
   int want = target - n - 7 - 4 - body_len;
   if (want < 1) {
-    *pad = 0;
+    *pad = 0;  // headers already overshot the target, nothing to pad with
     n += snprintf(buf + n, REQ_MAX - n, "\r\n");
     return n;
   }
@@ -106,13 +118,14 @@ int build_request(char *buf, const char *method, const char *path, const char *h
   return n;
 }
 
+// headers, then filler, then the terminator, then the body. one socket write each
 int send_request(const char *method, const char *path, const char *host,
                  const char *body, int body_len, int target) {
   char head[REQ_MAX];
   int pad = 0;
   int n = build_request(head, method, path, host, body_len, target, &pad);
   int sent = net_send(head, n);
-  int left = pad;
+  int left = pad;  // pad_block is only 128, so dribble it out
   while (left > 0) {
     int chunk = left > (int)sizeof(pad_block) ? (int)sizeof(pad_block) : left;
     sent += net_send(pad_block, chunk);
@@ -124,9 +137,9 @@ int send_request(const char *method, const char *path, const char *host,
 }
 
 bool net_ensure() {
-  if (!PERSISTENT) return true;
+  if (!PERSISTENT) return true;  // sensor opens its own socket per report, nothing to hold
   if (client.connected()) return true;
-  if (now64() < next_try) return false;
+  if (now64() < next_try) return false;  // still inside the backoff
   attempts++;
   // re-resolve from the third attempt in case the endpoint moved
   if (attempts >= 3) net_dns_refresh();
@@ -138,8 +151,9 @@ bool net_ensure() {
     return true;
   }
   gt_log("connection", "failed", 0);
-  int32_t jitter = (int32_t)backoff_ms / 5;
+  int32_t jitter = (int32_t)backoff_ms / 5;  // plus or minus 20 percent
   next_try = now64() + backoff_ms + random(-jitter, jitter + 1);
+  // doubles from 1 s, capped at 60
   backoff_ms = backoff_ms * 2 > RECONNECT_CAP_MS ? RECONNECT_CAP_MS : backoff_ms * 2;
   return false;
 }
@@ -147,18 +161,19 @@ bool net_ensure() {
 bool cloud_exchange(const char *cls, int out_bytes, int in_bytes) {
   if (!net_ensure()) return false;
   char path[32];
-  snprintf(path, sizeof(path), "/bytes/%d", in_bytes);
-  uint64_t t_sent = epoch_ms();
+  snprintf(path, sizeof(path), "/bytes/%d", in_bytes);  // n in the path is the reply size
+  uint64_t t_sent = epoch_ms();  // stamp before the write, latency is measured from here
   int sent = send_request("GET", path, CLOUD_HOST, nullptr, 0, out_bytes);
   int got = net_recv(3000);
   if (got <= 0) {
-    net_close();
+    net_close();  // half open or the peer timed the socket out, force a fresh handshake
     return false;
   }
   gt_log_at(cls, "sent", sent, t_sent);
   return true;
 }
 
+// keeps a name in the resolver log even while the socket is held, so the pi can key on it
 void net_dns_refresh() {
   IPAddress found;
   if (WiFi.hostByName(CLOUD_HOST, found)) {
@@ -171,7 +186,7 @@ void net_dns_refresh() {
 void net_ntp_sync() {
   uint8_t pkt[48];
   memset(pkt, 0, sizeof(pkt));
-  pkt[0] = 0xE3;
+  pkt[0] = 0xE3;  // leap unknown, version 4, mode 3 client, rest of the packet stays zero
   udp.begin(2390);
   udp.beginPacket(NTP_HOST, NTP_PORT);
   udp.write(pkt, sizeof(pkt));
@@ -186,19 +201,23 @@ void net_ntp_sync() {
   }
   udp.read(pkt, sizeof(pkt));
   udp.stop();
+  // transmit timestamp, bytes 40 to 47, seconds then a 32 bit fraction, both big endian
   uint32_t seconds = ((uint32_t)pkt[40] << 24) | ((uint32_t)pkt[41] << 16) |
                      ((uint32_t)pkt[42] << 8) | pkt[43];
   uint32_t frac = ((uint32_t)pkt[44] << 24) | ((uint32_t)pkt[45] << 16) |
                   ((uint32_t)pkt[46] << 8) | pkt[47];
+  // ntp counts from 1900 and unix from 1970, and 2^32 / 1000 is the fraction to ms divisor
   uint64_t unix_ms = (uint64_t)(seconds - 2208988800UL) * 1000ULL + (frac / 4294967ULL);
   // before the first sync there is no local clock to compare against
   int64_t offset = epoch_base_ms ? (int64_t)unix_ms - (int64_t)epoch_ms() : 0;
   epoch_base_ms = unix_ms;
   epoch_ref = now64();
+  // logged every sync, a node clock that drifts from the pi makes every latency number wrong
   Serial.printf("ntp offset %lld ms\n", (long long)offset);
   gt_log("ntp", "sync", (int)offset);
 }
 
+// its own socket, the beacon must not disturb the cloud connection it is meant to sit beside
 void net_beacon() {
   WiFiClientSecure beacon;
   beacon.setInsecure();
@@ -217,6 +236,7 @@ void net_beacon() {
   gt_log_at("beacon", "sent", n, t_sent);
 }
 
+// the ordered boot sequence is a behavioural mode of its own, the pi has to learn it
 bool net_boot() {
   memset(pad_block, 'x', sizeof(pad_block));
   Serial.printf("boot %s\n", DEVICE_NAME);
@@ -233,7 +253,7 @@ bool net_boot() {
   net_dns_refresh();
   delay(300);
   net_ntp_sync();
-  delay(300);
+  delay(300);  // the gaps are deliberate, a real boot is not one burst
   if (!net_open(CLOUD_HOST, cloud_port())) {
     Serial.println("tls handshake failed");
     return false;
@@ -243,7 +263,7 @@ bool net_boot() {
   int sent = send_request("GET", "/bytes/512", CLOUD_HOST, nullptr, 0, REGISTER_OUT);
   net_recv(5000);
   gt_log("boot", "registered", sent);
-  if (!PERSISTENT) net_close();
+  if (!PERSISTENT) net_close();  // sensor goes back to nothing open until its first report
   Serial.println("steady state");
   return true;
 }
@@ -258,10 +278,11 @@ bool media_start() {
                    "POST /__up HTTP/1.1\r\nHost: %s\r\nContent-Type: application/octet-stream\r\n"
                    "Content-Length: %d\r\nConnection: close\r\n\r\n",
                    MEDIA_HOST, (int)(MEDIA_BYTES * anomaly.volume_mult));
-  media.write((const uint8_t *)head, n);
+  media.write((const uint8_t *)head, n);  // content-length declared up front, so no chunking
   return true;
 }
 
+// called from the loop, writes what the pacing asked for and returns what actually went
 int media_slice(int bytes) {
   int left = bytes;
   while (left > 0) {

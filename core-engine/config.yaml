@@ -1,7 +1,7 @@
 # Any change done, to apply a core-service restart is required. The service will be
 # restarted automatically if the config file is changed.
 
-# phase 3 of the run plan, section 21: the injection campaign, in observe mode so that a
+# phase 3 of the run plan: the injection campaign, in observe mode so that a
 # trial cannot enforce and perturb the trial after it. phase 4 (enforcement verification)
 # completed 2026-08-25 under label enforce-verify. every analysis filters on this label
 run_label: "inject-3rep"
@@ -39,7 +39,6 @@ learning:
   learn_include_empty: false
 
 # the subset the model consumes, extraction always computes all twelve
-# pick this from tools/feature_report.py, not by guessing
 model_features:
   - bytes_out_rate # volume out, pkts_out_rate is 0.99 with it
   - bytes_in_rate # volume in, pkts_in_rate is 0.99 with it
@@ -96,14 +95,14 @@ variance_floors:
   tcp_syn_rate: 0.01
 
 enforcement:
-  # back to observe for the injection campaign. section 21 is explicit that phase 3 runs in
-  # observe deliberately: if a trial enforced, a throttle would change the traffic the next
-  # trial sees and the trials would stop being independent. enforce is for phase 4 only
+  # back to observe for the injection campaign. phase 3 runs in observe deliberately: if a
+  # trial enforced, a throttle would change the traffic the next trial sees and the trials
+  # would stop being independent. enforce is for phase 4 only
   mode: observe
   never_enforce:
     - "aa:bb:cc:dd:ee:ff"
-    # section 17 requires both commercial MACs here for the whole of phase 4. they are the
-    # uncontrolled realism anchor for RQ2 and a vendor check-in must never cost one of them
+    # both commercial MACs stay here for the whole of phase 4. they are the uncontrolled
+    # realism anchor and a vendor check-in must never cost one of them
     # mid-experiment. inert in observe mode, so it is here early on purpose
     - "0c:ef:15:25:af:1a" # Tapo P100 plug
     - "e0:d3:62:fb:cb:97" # Tapo L630 bulb

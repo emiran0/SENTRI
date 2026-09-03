@@ -9,6 +9,7 @@ CREATE TABLE IF NOT EXISTS devices (
     last_seen REAL, tier TEXT, consecutive_count INTEGER, learning_started REAL,
     baseline_id INTEGER);
 
+-- UNIQUE(mac, window_start) is what makes reprocessing a chunk a no-op
 CREATE TABLE IF NOT EXISTS windows (
     id INTEGER PRIMARY KEY, mac TEXT, window_start INTEGER, duration_s REAL,
     complete INTEGER, packets INTEGER, features_json TEXT, counters_json TEXT,
@@ -47,14 +48,13 @@ def connect(path):
         os.makedirs(parent, exist_ok=True)
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA journal_mode = WAL")  # dashboard reads while the engine writes
     conn.execute("PRAGMA synchronous = NORMAL")
     conn.executescript(SCHEMA)
     ensure_column(conn, "baselines", "feature_names_json", "TEXT")
-    # bitmask of the last few tier decisions, so escalation can tolerate a gap
+    # last few tier decisions as a bitmask, so escalation can tolerate a gap
     ensure_column(conn, "devices", "recent_flags", "INTEGER DEFAULT 0")
-    # when an operator last cleared this device, so queued windows captured before the
-    # clear cannot re-enforce it
+    # last operator clear, queued windows from before it must not re-enforce
     ensure_column(conn, "devices", "cleared_at", "REAL")
     return conn
 
@@ -85,10 +85,8 @@ def all_devices(conn):
 
 
 def add_device(conn, mac, ip, ts):
-    # named columns, not positional VALUES: ensure_column appends to this table as the
-    # schema grows, and a positional insert silently goes wrong the first time a new device
-    # appears after a migration. it broke on the first replay, which was the first new
-    # device enrolled since recent_flags and cleared_at were added
+    # named columns, not positional. ensure_column keeps appending to this table and a
+    # positional insert goes quietly wrong on the first new device after a migration
     conn.execute(
         "INSERT INTO devices (mac, ip, name, state, first_seen, last_seen, tier,"
         " consecutive_count, learning_started, baseline_id)"
@@ -112,8 +110,14 @@ def add_window(conn, mac, window_start, duration, complete, packets, features, c
          json.dumps(counters), json.dumps(new_dests), label),
     )
     conn.commit()
-    # None means this window was already stored, which is how reprocessing stays a no-op
+    # None means it was already there, that is how reprocessing stays a no-op
     return cur.lastrowid if cur.rowcount else None
+
+
+# def recent_windows(conn, mac, n):
+#     # wanted this for the dashboard, prev_window is all the scoring path needs
+#     return rows(conn, "SELECT * FROM windows WHERE mac = ? ORDER BY window_start DESC"
+#                 " LIMIT ?", (mac, n))
 
 
 def learning_windows(conn, mac, since):
@@ -213,7 +217,7 @@ def injection_spans(conn, mac):
         " ORDER BY device_ts_ms",
         (mac,),
     )
-    spans, start = [], None
+    spans, start = [], None  # start / stop pairs, in device clock seconds
     for e in entries:
         if e["action"] == "start":
             start = e["device_ts_ms"] / 1000.0
@@ -221,5 +225,5 @@ def injection_spans(conn, mac):
             spans.append((start, e["device_ts_ms"] / 1000.0))
             start = None
     if start is not None:
-        spans.append((start, start + 86400))
+        spans.append((start, start + 86400))  # never stopped, blank out the day
     return spans

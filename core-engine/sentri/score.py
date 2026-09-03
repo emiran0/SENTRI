@@ -5,11 +5,12 @@ TIERS = ("normal", "alert", "throttle", "block")
 
 def distance(vector, base):
     names = base["names"]
-    # the precision is fitted in standardised space, so delta is already the z score
+    # precision is fitted in standardised space, so delta is already the z score
     delta = (vector - base["mean"]) / base["scale"]
     weighted = base["precision"] @ delta
     d2 = float(delta @ weighted)
     contrib = delta * weighted
+    # top 3, that is all the event detail has room for
     top = [{"feature": names[i], "value": float(contrib[i]),
             "share": float(contrib[i] / d2) if d2 else 0.0}
            for i in np.argsort(-np.abs(contrib))[:3]]
@@ -21,6 +22,7 @@ def novelty(dests, services, base):
     new_dests, rotations = [], 0
     for key, addrs in dests.items():
         if key in base["dests"]:
+            # known key, unseen address. cdn shuffling, not a new destination
             rotations += len([a for a in addrs if a not in base["ips"]])
         else:
             new_dests.append(key)
@@ -35,34 +37,33 @@ def discrete_hits(new_dests, new_services):
     return hits + ["new_service " + s for s in new_services]
 
 
-# a new prefix is address rotation under a known domain, it can alert and throttle, never block
+# def repeat_hits(hits, hits_before):
+#     # was meant to weight a key that keeps coming back, but hits_before is only a bool by
+#     # the time it reaches here, so this ended up counting rotations twice
+#     return len([h for h in hits if h in hits_before])
+
+
+# a new prefix is just address rotation under a known domain, alerts and throttles, never blocks
 def hard_novelty(keys):
     return any(not k.startswith("p:") for k in keys)
 
 
-# learning fits only complete, non empty windows, so a truncated or silent window has no
-# distribution behind its distance and the distance must be ignored. its novelty is still
-# real: a domain is a domain whether the window ran 105 seconds or 300
+# learning only fits complete, non empty windows, so a truncated one has no distribution
+# behind its distance. novelty still counts, a domain is a domain either way
 def trusted_distance(packets, complete, conf):
     return bool(complete) and (bool(packets) or conf["learning"]["learn_include_empty"])
 
 
-# an operator clear is authoritative. the capture to score path is several minutes deep, so
-# when an operator clears a device there are still windows in the queue that were captured
-# while enforcement was in force. those windows describe exactly the state the operator just
-# overruled, and scoring them re-enforces a device that has already been cleared. measured
-# 2026-08-25: a manual unblock at 18:14 was reversed at 18:19 by two windows captured before
-# it. a window that merely overlaps the clear is also suspect, so the test is on its start.
+# an operator clear wins. capture to score is minutes deep, so windows captured before the
+# clear are still queued and would re-enforce a device that was already cleared (2026-08-25,
+# an 18:14 unblock reversed at 18:19). test the start, an overlapping window is suspect too
 def superseded_by_clear(window_start, cleared_at):
     return bool(cleared_at) and window_start < cleared_at
 
 
-# count is a signed streak: positive counts anomalous windows, negative counts normal ones.
-# recent is a bitmask of the last `escalate_window` decisions, newest in bit 0, which is
-# what lets escalation tolerate a gap. a consecutive streak cannot: measured on the live
-# injections of 2026-08-25, a sustained volume anomaly cleared the threshold in two windows
-# out of three with the gap in the middle, so the streak reset every time and a real
-# anomaly never escalated. see docs/2026-08-25_live-injection-campaign.md
+# count is a signed streak, positive anomalous / negative normal. recent is a bitmask of the
+# last escalate_window decisions, newest in bit 0, so escalation survives a gap. a plain
+# consecutive streak did not
 def decide_tier(tier, count, d2, thresholds, hits, hits_before, trusted, conf, recent=0):
     rules = conf["thresholds"]
     span = max(1, int(rules.get("escalate_window", 2)))
@@ -74,12 +75,11 @@ def decide_tier(tier, count, d2, thresholds, hits, hits_before, trusted, conf, r
     else:
         count = count - 1 if count < 0 else -1
     recent = ((recent << 1) | int(anomalous)) & ((1 << span) - 1)
-    agree = bin(recent).count("1")
+    agree = bin(recent).count("1")  # how many of the last span windows flagged
     hard = [h for h in hits if not h.startswith("new_prefix")]
-    # the distance was the only route to block that could act on a single window. it now
-    # takes the same agreement the novelty route already required, so one heavy reconnect
-    # alerts and only a sustained deviation enforces
+    # distance used to block off one window, now it needs the agreement novelty already did
     critical = trusted and d2 >= thresholds["t_critical"] and agree >= need
+    # critical = trusted and d2 >= thresholds["t_critical"]
     if critical or (hard and hits_before):
         new = "block"
     elif agree >= need and anomalous:
@@ -91,7 +91,7 @@ def decide_tier(tier, count, d2, thresholds, hits, hits_before, trusted, conf, r
         if -count >= conf["thresholds"]["deescalate_windows"]:
             new = TIERS[max(0, TIERS.index(tier) - 1)]
             count = 0
-    # a device only ever steps down one tier at a time, never straight to normal
+    # one tier down at a time, never straight back to normal
     if TIERS.index(new) < TIERS.index(tier) and anomalous:
         new = tier
     return new, count, recent

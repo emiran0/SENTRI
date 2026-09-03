@@ -5,6 +5,7 @@ CHUNK_PREFIX = "iot-"
 CHUNK_SUFFIX = ".pcap"
 
 
+# the filename is the clock here, mtime keeps moving while the chunk is written
 def chunk_time(name):
     stamp = name[len(CHUNK_PREFIX):-len(CHUNK_SUFFIX)]
     return time.mktime(time.strptime(stamp, "%Y%m%d-%H%M%S"))
@@ -31,7 +32,7 @@ def pending(conf):
     directory = conf["paths"]["captures"]
     if not os.path.isdir(directory):
         return []
-    mark = read_watermark(conf)
+    mark = read_watermark(conf)  # last chunk we finished, names sort in time order
     cutoff = time.time() - conf["capture"]["grace_seconds"]
     out = []
     for name in sorted(os.listdir(directory)):
@@ -40,7 +41,7 @@ def pending(conf):
         if name <= mark:
             continue
         path = os.path.join(directory, name)
-        # an actively written chunk keeps touching its mtime, so grace alone is enough
+        # a chunk still being written keeps touching its mtime, so grace is enough
         if os.path.getmtime(path) > cutoff:
             continue
         out.append((path, name, chunk_time(name)))
